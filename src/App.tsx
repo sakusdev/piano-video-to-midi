@@ -201,6 +201,15 @@ export default function App(){
     const scale=Math.min(1,960/vw);
     c.width=Math.floor(vw*scale);
     c.height=Math.floor(vh*scale);
+    if (!keyboardRect) {
+      const autoH = c.height * 0.34;
+      setKeyboardRect({
+        x: Math.round(c.width * 0.06),
+        y: Math.round(c.height - autoH - c.height * 0.03),
+        w: Math.round(c.width * 0.88),
+        h: Math.round(autoH),
+      });
+    }
     drawFrame();
   }
 
@@ -381,6 +390,31 @@ export default function App(){
     setStatus("停止");
   }
 
+  function fitKeyboardDefault() {
+    const c = canvasRef.current;
+    if (!c) return;
+    const autoH = c.height * 0.34;
+    setKeyboardRect({
+      x: Math.round(c.width * 0.06),
+      y: Math.round(c.height - autoH - c.height * 0.03),
+      w: Math.round(c.width * 0.88),
+      h: Math.round(autoH),
+    });
+    setStatus("鍵盤範囲を自動配置しました。必要なら下のスライダーで微調整してください。");
+  }
+
+  function updateKeyboardRect(patch: Partial<Rect>) {
+    const c = canvasRef.current;
+    if (!c) return;
+    const base = keyboardRect ?? { x: 0, y: Math.round(c.height * 0.62), w: c.width, h: Math.round(c.height * 0.34) };
+    const next = { ...base, ...patch };
+    next.x = clamp(Math.round(next.x), 0, Math.max(0, c.width - 10));
+    next.y = clamp(Math.round(next.y), 0, Math.max(0, c.height - 10));
+    next.w = clamp(Math.round(next.w), 10, c.width - next.x);
+    next.h = clamp(Math.round(next.h), 10, c.height - next.y);
+    setKeyboardRect(next);
+  }
+
   function exportMidi(){
     const v=videoRef.current;
     const now=v ? v.currentTime*1000 : 0;
@@ -488,6 +522,9 @@ export default function App(){
                 setDragStart(null);
               }}
             />
+            <div className="status-box">
+              範囲指定が難しい場合: 「鍵盤範囲を自動配置」→ 下の X/Y/W/H スライダーで微調整
+            </div>
           </div>
 
           <div className="control-panel">
@@ -531,6 +568,25 @@ export default function App(){
               <button className="btn" onClick={stop} disabled={!isAnalyzing}>stop</button>
               <button className="btn btn-success button-wide" onClick={exportMidi}>export MIDI</button>
             </div>
+            <div className="button-grid">
+              <button className="btn button-wide" onClick={fitKeyboardDefault}>鍵盤範囲を自動配置</button>
+            </div>
+            {keyboardRect && (
+              <div>
+                <label className="control-group">keyboard X {Math.round(keyboardRect.x)}
+                  <input className="control-input" type="range" min={0} max={canvasRef.current?.width ?? 1} value={keyboardRect.x} onChange={e=>updateKeyboardRect({x:+e.target.value})}/>
+                </label>
+                <label className="control-group">keyboard Y {Math.round(keyboardRect.y)}
+                  <input className="control-input" type="range" min={0} max={canvasRef.current?.height ?? 1} value={keyboardRect.y} onChange={e=>updateKeyboardRect({y:+e.target.value})}/>
+                </label>
+                <label className="control-group">keyboard W {Math.round(keyboardRect.w)}
+                  <input className="control-input" type="range" min={50} max={canvasRef.current?.width ?? 50} value={keyboardRect.w} onChange={e=>updateKeyboardRect({w:+e.target.value})}/>
+                </label>
+                <label className="control-group">keyboard H {Math.round(keyboardRect.h)}
+                  <input className="control-input" type="range" min={30} max={canvasRef.current?.height ?? 30} value={keyboardRect.h} onChange={e=>updateKeyboardRect({h:+e.target.value})}/>
+                </label>
+              </div>
+            )}
             <p className="help-text">Tip: Hybrid + confirm frames 2-3 + min note 40-70ms がSynthesiaで安定しやすいです。</p>
 
             <div className="notes-count">notes: {eventCount}</div>
