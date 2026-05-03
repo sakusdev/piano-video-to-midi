@@ -1,0 +1,31 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  margin: 0;
+  background: #020617;
+}
+
+button,
+select,
+input {
+  color-scheme: dark;
+}
+
+button {
+  border-radius: 0.75rem;
+  padding: 0.5rem 0.9rem;
+  background: #334155;
+  font-weight: 700;
+}
+
+button:hover {
+  filter: brightness(1.12);
+}
+
+select {
+  background: #1e293b;
+  border-radius: 0.75rem;
+  padding: 0.5rem;
+}
