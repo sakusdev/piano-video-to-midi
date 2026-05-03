@@ -100,6 +100,23 @@ function scanLine(ctx:CanvasRenderingContext2D, key:KeyRegion, y:number, h:numbe
   return { ratio: Math.max(cr, br*0.85), strength: str/Math.max(1,cnt) };
 }
 
+function denoiseAndMerge(events: NoteEvent[], minNoteMs: number, gapMs = 22): NoteEvent[] {
+  const sorted = [...events]
+    .filter((e) => e.endMs - e.startMs >= minNoteMs)
+    .sort((a, b) => a.midi - b.midi || a.startMs - b.startMs);
+  const merged: NoteEvent[] = [];
+  for (const e of sorted) {
+    const last = merged[merged.length - 1];
+    if (last && last.midi === e.midi && e.startMs - last.endMs <= gapMs) {
+      last.endMs = Math.max(last.endMs, e.endMs);
+      last.velocity = Math.max(last.velocity, e.velocity);
+      continue;
+    }
+    merged.push({ ...e });
+  }
+  return merged.sort((a, b) => a.startMs - b.startMs || a.midi - b.midi);
+}
+
 const clamp=(n:number,min:number,max:number)=>Math.max(min,Math.min(max,n));
 
 function writeVarLen(v:number){
@@ -184,6 +201,15 @@ export default function App(){
     const scale=Math.min(1,960/vw);
     c.width=Math.floor(vw*scale);
     c.height=Math.floor(vh*scale);
+    if (!keyboardRect) {
+      const autoH = c.height * 0.34;
+      setKeyboardRect({
+        x: Math.round(c.width * 0.06),
+        y: Math.round(c.height - autoH - c.height * 0.03),
+        w: Math.round(c.width * 0.88),
+        h: Math.round(autoH),
+      });
+    }
     drawFrame();
   }
 
@@ -257,8 +283,14 @@ export default function App(){
       const glowOn=gdiff>threshold;
       const glowOff=gdiff<threshold*0.45;
 
-      const shouldOn = mode==="hybrid" ? (fallOn||glowOn) : mode==="falling" ? fallOn : glowOn;
-      const shouldOff= mode==="hybrid" ? (fallOff&&glowOff) : mode==="falling" ? fallOff : glowOff;
+      const hybridOnScore = (fall.ratio * 100) + Math.max(0, gdiff) * 0.9;
+      const hybridOffScore = (fall.ratio * 100) + Math.max(0, gdiff) * 0.6;
+      const shouldOn = mode==="hybrid"
+        ? (hybridOnScore > threshold * 1.5 || (fallOn && glowOn))
+        : mode==="falling" ? fallOn : glowOn;
+      const shouldOff= mode==="hybrid"
+        ? (hybridOffScore < threshold * 0.95 && (fallOff || glowOff))
+        : mode==="falling" ? fallOff : glowOff;
 
       const strength=Math.max(gdiff,fall.strength);
       const active=activeRef.current.get(key.midi);
@@ -358,6 +390,31 @@ export default function App(){
     setStatus("停止");
   }
 
+  function fitKeyboardDefault() {
+    const c = canvasRef.current;
+    if (!c) return;
+    const autoH = c.height * 0.34;
+    setKeyboardRect({
+      x: Math.round(c.width * 0.06),
+      y: Math.round(c.height - autoH - c.height * 0.03),
+      w: Math.round(c.width * 0.88),
+      h: Math.round(autoH),
+    });
+    setStatus("鍵盤範囲を自動配置しました。必要なら下のスライダーで微調整してください。");
+  }
+
+  function updateKeyboardRect(patch: Partial<Rect>) {
+    const c = canvasRef.current;
+    if (!c) return;
+    const base = keyboardRect ?? { x: 0, y: Math.round(c.height * 0.62), w: c.width, h: Math.round(c.height * 0.34) };
+    const next = { ...base, ...patch };
+    next.x = clamp(Math.round(next.x), 0, Math.max(0, c.width - 10));
+    next.y = clamp(Math.round(next.y), 0, Math.max(0, c.height - 10));
+    next.w = clamp(Math.round(next.w), 10, c.width - next.x);
+    next.h = clamp(Math.round(next.h), 10, c.height - next.y);
+    setKeyboardRect(next);
+  }
+
   function exportMidi(){
     const v=videoRef.current;
     const now=v ? v.currentTime*1000 : 0;
@@ -372,9 +429,7 @@ export default function App(){
     }
     activeRef.current.clear();
 
-    const sorted=[...eventsRef.current]
-      .filter(e=>e.endMs-e.startMs>=minNoteMs)
-      .sort((a,b)=>a.startMs-b.startMs||a.midi-b.midi);
+    const sorted = denoiseAndMerge(eventsRef.current, minNoteMs);
 
     if(!sorted.length){
       setStatus("ノートなし。thresholdを下げるかline offsetを調整");
@@ -404,19 +459,20 @@ export default function App(){
   useEffect(()=>{
     const t=setInterval(drawFrame,80);
     return ()=>clearInterval(t);
-  });
+  }, [videoUrl, keyboardRect, dragRect, regions, hitLineOffset]);
 
   return (
-    <div className="min-h-screen bg-slate-950 p-4 text-slate-100">
-      <div className="mx-auto max-w-6xl space-y-4">
+    <div className="app-shell">
+      <div className="app-container">
         <div>
-          <h1 className="text-2xl font-bold">Perfect Piano Video → MIDI</h1>
-          <p className="text-slate-400">Synthesia / Ember風動画からMIDIを生成</p>
+          <h1 className="app-title">Perfect Piano Video → MIDI</h1>
+          <p className="app-subtitle">Synthesia / Ember風動画からMIDIを生成</p>
         </div>
 
-        <div className="grid gap-4 md:grid-cols-[1fr_320px]">
-          <div className="space-y-3 rounded-2xl bg-slate-900 p-4">
+        <div className="layout-grid">
+          <div className="video-panel">
             <input
+              className="file-input"
               type="file"
               accept="video/*"
               onChange={e=>{
@@ -437,12 +493,12 @@ export default function App(){
               onSeeked={drawFrame}
               onPause={drawFrame}
               controls
-              className="w-full rounded-xl bg-black"
+              className="video-preview"
             />
 
             <canvas
               ref={canvasRef}
-              className="w-full cursor-crosshair rounded-xl border border-slate-700 bg-black"
+              className="canvas-preview"
               onPointerDown={e=>{
                 const p=canvasPoint(e);
                 setDragStart(p);
@@ -466,51 +522,74 @@ export default function App(){
                 setDragStart(null);
               }}
             />
+            <div className="status-box">
+              範囲指定が難しい場合: 「鍵盤範囲を自動配置」→ 下の X/Y/W/H スライダーで微調整
+            </div>
           </div>
 
-          <div className="space-y-4 rounded-2xl bg-slate-900 p-4">
-            <div className="rounded-xl bg-slate-800 p-3 text-sm">{status}</div>
+          <div className="control-panel">
+            <div className="status-box">{status}</div>
 
-            <label className="block text-sm">
+            <label className="control-group">
               検出モード
-              <select className="mt-1 w-full" value={mode} onChange={e=>setMode(e.target.value as DetectionMode)}>
+              <select className="control-input" value={mode} onChange={e=>setMode(e.target.value as DetectionMode)}>
                 <option value="hybrid">Hybrid: 落下ノーツ + 発光</option>
                 <option value="falling">Falling: 落下ノーツのみ</option>
                 <option value="glow">Glow: 発光のみ</option>
               </select>
             </label>
 
-            <label className="block text-sm">threshold {threshold}
-              <input className="w-full" type="range" min={5} max={60} value={threshold} onChange={e=>setThreshold(+e.target.value)}/>
+            <label className="control-group">threshold {threshold}
+              <input className="control-input" type="range" min={5} max={60} value={threshold} onChange={e=>setThreshold(+e.target.value)}/>
             </label>
 
-            <label className="block text-sm">line offset {hitLineOffset}%
-              <input className="w-full" type="range" min={2} max={60} value={hitLineOffset} onChange={e=>setHitLineOffset(+e.target.value)}/>
+            <label className="control-group">line offset {hitLineOffset}%
+              <input className="control-input" type="range" min={2} max={60} value={hitLineOffset} onChange={e=>setHitLineOffset(+e.target.value)}/>
             </label>
 
-            <label className="block text-sm">line height {lineHeight}px
-              <input className="w-full" type="range" min={1} max={16} value={lineHeight} onChange={e=>setLineHeight(+e.target.value)}/>
+            <label className="control-group">line height {lineHeight}px
+              <input className="control-input" type="range" min={1} max={16} value={lineHeight} onChange={e=>setLineHeight(+e.target.value)}/>
             </label>
 
-            <label className="block text-sm">color strict {colorStrictness}
-              <input className="w-full" type="range" min={0} max={40} value={colorStrictness} onChange={e=>setColorStrictness(+e.target.value)}/>
+            <label className="control-group">color strict {colorStrictness}
+              <input className="control-input" type="range" min={0} max={40} value={colorStrictness} onChange={e=>setColorStrictness(+e.target.value)}/>
             </label>
 
-            <label className="block text-sm">confirm frames {confirmFrames}
-              <input className="w-full" type="range" min={1} max={5} value={confirmFrames} onChange={e=>setConfirmFrames(+e.target.value)}/>
+            <label className="control-group">confirm frames {confirmFrames}
+              <input className="control-input" type="range" min={1} max={5} value={confirmFrames} onChange={e=>setConfirmFrames(+e.target.value)}/>
             </label>
 
-            <label className="block text-sm">min note {minNoteMs}ms
-              <input className="w-full" type="range" min={10} max={160} value={minNoteMs} onChange={e=>setMinNoteMs(+e.target.value)}/>
+            <label className="control-group">min note {minNoteMs}ms
+              <input className="control-input" type="range" min={10} max={160} value={minNoteMs} onChange={e=>setMinNoteMs(+e.target.value)}/>
             </label>
 
-            <div className="grid grid-cols-2 gap-2">
-              <button className="bg-cyan-500 text-slate-950" onClick={start} disabled={isAnalyzing}>start</button>
-              <button onClick={stop} disabled={!isAnalyzing}>stop</button>
-              <button className="col-span-2 bg-emerald-500 text-slate-950" onClick={exportMidi}>export MIDI</button>
+            <div className="button-grid">
+              <button className="btn btn-primary" onClick={start} disabled={isAnalyzing}>start</button>
+              <button className="btn" onClick={stop} disabled={!isAnalyzing}>stop</button>
+              <button className="btn btn-success button-wide" onClick={exportMidi}>export MIDI</button>
             </div>
+            <div className="button-grid">
+              <button className="btn button-wide" onClick={fitKeyboardDefault}>鍵盤範囲を自動配置</button>
+            </div>
+            {keyboardRect && (
+              <div>
+                <label className="control-group">keyboard X {Math.round(keyboardRect.x)}
+                  <input className="control-input" type="range" min={0} max={canvasRef.current?.width ?? 1} value={keyboardRect.x} onChange={e=>updateKeyboardRect({x:+e.target.value})}/>
+                </label>
+                <label className="control-group">keyboard Y {Math.round(keyboardRect.y)}
+                  <input className="control-input" type="range" min={0} max={canvasRef.current?.height ?? 1} value={keyboardRect.y} onChange={e=>updateKeyboardRect({y:+e.target.value})}/>
+                </label>
+                <label className="control-group">keyboard W {Math.round(keyboardRect.w)}
+                  <input className="control-input" type="range" min={50} max={canvasRef.current?.width ?? 50} value={keyboardRect.w} onChange={e=>updateKeyboardRect({w:+e.target.value})}/>
+                </label>
+                <label className="control-group">keyboard H {Math.round(keyboardRect.h)}
+                  <input className="control-input" type="range" min={30} max={canvasRef.current?.height ?? 30} value={keyboardRect.h} onChange={e=>updateKeyboardRect({h:+e.target.value})}/>
+                </label>
+              </div>
+            )}
+            <p className="help-text">Tip: Hybrid + confirm frames 2-3 + min note 40-70ms がSynthesiaで安定しやすいです。</p>
 
-            <div className="text-sm text-slate-300">notes: {eventCount}</div>
+            <div className="notes-count">notes: {eventCount}</div>
           </div>
         </div>
       </div>
