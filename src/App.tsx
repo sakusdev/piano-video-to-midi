@@ -100,6 +100,23 @@ function scanLine(ctx:CanvasRenderingContext2D, key:KeyRegion, y:number, h:numbe
   return { ratio: Math.max(cr, br*0.85), strength: str/Math.max(1,cnt) };
 }
 
+function denoiseAndMerge(events: NoteEvent[], minNoteMs: number, gapMs = 22): NoteEvent[] {
+  const sorted = [...events]
+    .filter((e) => e.endMs - e.startMs >= minNoteMs)
+    .sort((a, b) => a.midi - b.midi || a.startMs - b.startMs);
+  const merged: NoteEvent[] = [];
+  for (const e of sorted) {
+    const last = merged[merged.length - 1];
+    if (last && last.midi === e.midi && e.startMs - last.endMs <= gapMs) {
+      last.endMs = Math.max(last.endMs, e.endMs);
+      last.velocity = Math.max(last.velocity, e.velocity);
+      continue;
+    }
+    merged.push({ ...e });
+  }
+  return merged.sort((a, b) => a.startMs - b.startMs || a.midi - b.midi);
+}
+
 const clamp=(n:number,min:number,max:number)=>Math.max(min,Math.min(max,n));
 
 function writeVarLen(v:number){
@@ -257,8 +274,14 @@ export default function App(){
       const glowOn=gdiff>threshold;
       const glowOff=gdiff<threshold*0.45;
 
-      const shouldOn = mode==="hybrid" ? (fallOn||glowOn) : mode==="falling" ? fallOn : glowOn;
-      const shouldOff= mode==="hybrid" ? (fallOff&&glowOff) : mode==="falling" ? fallOff : glowOff;
+      const hybridOnScore = (fall.ratio * 100) + Math.max(0, gdiff) * 0.9;
+      const hybridOffScore = (fall.ratio * 100) + Math.max(0, gdiff) * 0.6;
+      const shouldOn = mode==="hybrid"
+        ? (hybridOnScore > threshold * 1.5 || (fallOn && glowOn))
+        : mode==="falling" ? fallOn : glowOn;
+      const shouldOff= mode==="hybrid"
+        ? (hybridOffScore < threshold * 0.95 && (fallOff || glowOff))
+        : mode==="falling" ? fallOff : glowOff;
 
       const strength=Math.max(gdiff,fall.strength);
       const active=activeRef.current.get(key.midi);
@@ -372,9 +395,7 @@ export default function App(){
     }
     activeRef.current.clear();
 
-    const sorted=[...eventsRef.current]
-      .filter(e=>e.endMs-e.startMs>=minNoteMs)
-      .sort((a,b)=>a.startMs-b.startMs||a.midi-b.midi);
+    const sorted = denoiseAndMerge(eventsRef.current, minNoteMs);
 
     if(!sorted.length){
       setStatus("ノートなし。thresholdを下げるかline offsetを調整");
@@ -404,7 +425,7 @@ export default function App(){
   useEffect(()=>{
     const t=setInterval(drawFrame,80);
     return ()=>clearInterval(t);
-  });
+  }, [videoUrl, keyboardRect, dragRect, regions, hitLineOffset]);
 
   return (
     <div className="min-h-screen bg-slate-950 p-4 text-slate-100">
@@ -509,6 +530,7 @@ export default function App(){
               <button onClick={stop} disabled={!isAnalyzing}>stop</button>
               <button className="col-span-2 bg-emerald-500 text-slate-950" onClick={exportMidi}>export MIDI</button>
             </div>
+            <p className="text-xs text-slate-400">Tip: Hybrid + confirm frames 2-3 + min note 40-70ms がSynthesiaで安定しやすいです。</p>
 
             <div className="text-sm text-slate-300">notes: {eventCount}</div>
           </div>
