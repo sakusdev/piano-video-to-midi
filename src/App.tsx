@@ -423,7 +423,7 @@ export default function App(){
     if (!c) return;
     const base = keyboardRect ?? { x: 0, y: Math.round(c.height * 0.62), w: c.width, h: Math.round(c.height * 0.34) };
     const next = { ...base, ...patch };
-    next.x = clamp(Math.round(next.x), -Math.round(c.width * 0.25), Math.max(0, c.width - 10));
+    next.x = clamp(Math.round(next.x), -Math.round(c.width), Math.max(0, c.width - 10));
     next.y = clamp(Math.round(next.y), 0, Math.max(0, c.height - 10));
     next.w = clamp(Math.round(next.w), 10, Math.round(c.width * 1.5));
     next.h = clamp(Math.round(next.h), 10, c.height - next.y);
@@ -589,7 +589,7 @@ export default function App(){
             {keyboardRect && (
               <div>
                 <label className="control-group">keyboard X {Math.round(keyboardRect.x)}
-                  <input className="control-input" type="range" min={0} max={canvasRef.current?.width ?? 1} value={keyboardRect.x} onChange={e=>updateKeyboardRect({x:+e.target.value})}/>
+                  <input className="control-input" type="range" min={-Math.round(canvasRef.current?.width ?? 1)} max={canvasRef.current?.width ?? 1} value={keyboardRect.x} onChange={e=>updateKeyboardRect({x:+e.target.value})}/>
                 </label>
                 <label className="control-group">keyboard Y {Math.round(keyboardRect.y)}
                   <input className="control-input" type="range" min={0} max={canvasRef.current?.height ?? 1} value={keyboardRect.y} onChange={e=>updateKeyboardRect({y:+e.target.value})}/>
