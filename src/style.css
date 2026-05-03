@@ -1,31 +1,42 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
 body {
   margin: 0;
+  font-family: Inter, system-ui, -apple-system, sans-serif;
   background: #020617;
+  color: #e2e8f0;
 }
 
-button,
-select,
-input {
+.app-shell { min-height: 100vh; padding: 12px; }
+.app-container { max-width: 1200px; margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
+.app-title { font-size: 1.8rem; font-weight: 800; margin: 0; color: #f8fafc; }
+.app-subtitle { margin: 4px 0 0; color: #94a3b8; }
+.layout-grid { display: grid; gap: 12px; grid-template-columns: 1fr; }
+.video-panel, .control-panel { background: #0f172a; border: 1px solid #1e293b; border-radius: 14px; padding: 12px; }
+.video-panel { display: flex; flex-direction: column; gap: 10px; }
+.file-input { color: #e2e8f0; }
+.video-preview, .canvas-preview { width: 100%; border-radius: 10px; background: #000; border: 1px solid #334155; }
+.canvas-preview { cursor: crosshair; }
+.status-box { background: #1e293b; color: #f8fafc; padding: 10px; border-radius: 10px; font-size: 0.92rem; }
+.control-group { display: block; font-size: 0.92rem; color: #e2e8f0; margin-bottom: 8px; }
+.control-input { margin-top: 6px; width: 100%; }
+.button-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.button-wide { grid-column: 1 / -1; }
+.btn { border-radius: 10px; padding: 10px 12px; border: 1px solid #475569; background: #334155; color: #f8fafc; font-weight: 700; }
+.btn:disabled { opacity: 0.5; }
+.btn-primary { background: #22d3ee; color: #0f172a; border-color: #22d3ee; }
+.btn-success { background: #34d399; color: #022c22; border-color: #34d399; }
+.help-text { font-size: 0.8rem; color: #94a3b8; margin: 4px 0 0; }
+.notes-count { color: #cbd5e1; font-size: 0.9rem; }
+
+input[type="range"] {
+  accent-color: #60a5fa;
+}
+
+select, input, button {
   color-scheme: dark;
 }
-
-button {
-  border-radius: 0.75rem;
-  padding: 0.5rem 0.9rem;
-  background: #334155;
-  font-weight: 700;
+select.control-input {
+  border-radius: 10px; background: #1e293b; color: #e2e8f0; border: 1px solid #334155; padding: 8px;
 }
-
-button:hover {
-  filter: brightness(1.12);
-}
-
-select {
-  background: #1e293b;
-  border-radius: 0.75rem;
-  padding: 0.5rem;
+@media (min-width: 960px) {
+  .layout-grid { grid-template-columns: minmax(0, 1fr) 340px; }
 }
