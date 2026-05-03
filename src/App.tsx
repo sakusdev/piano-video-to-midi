@@ -50,8 +50,10 @@ function buildPianoRegions(rect: Rect): KeyRegion[] {
 function getLumaScore(ctx: CanvasRenderingContext2D, r: Rect){
   const x=Math.max(0,Math.floor(r.x));
   const y=Math.max(0,Math.floor(r.y));
-  const w=Math.max(1,Math.floor(r.w));
-  const h=Math.max(1,Math.floor(r.h));
+  const maxW = Math.max(1, ctx.canvas.width - x);
+  const maxH = Math.max(1, ctx.canvas.height - y);
+  const w=Math.max(1,Math.min(Math.floor(r.w), maxW));
+  const h=Math.max(1,Math.min(Math.floor(r.h), maxH));
   const d=ctx.getImageData(x,y,w,h).data;
   let sum=0, hot=0, c=0;
   for(let yy=0;yy<h;yy+=2){
@@ -81,9 +83,13 @@ function rgbToHsv(r:number,g:number,b:number){
 }
 
 function scanLine(ctx:CanvasRenderingContext2D, key:KeyRegion, y:number, h:number, strict:number){
-  const x=Math.floor(key.x+key.w*0.1);
-  const w=Math.floor(key.w*0.8);
-  const data=ctx.getImageData(Math.max(0,x),Math.max(0,Math.floor(y)),Math.max(1,w),Math.max(1,Math.floor(h))).data;
+  const x=Math.max(0,Math.floor(key.x+key.w*0.1));
+  const yy=Math.max(0,Math.floor(y));
+  const maxW = Math.max(1, ctx.canvas.width - x);
+  const maxH = Math.max(1, ctx.canvas.height - yy);
+  const w=Math.max(1,Math.min(Math.floor(key.w*0.8), maxW));
+  const hh=Math.max(1,Math.min(Math.floor(h), maxH));
+  const data=ctx.getImageData(x, yy, w, hh).data;
   let col=0, bri=0, str=0, cnt=0;
   for(let i=0;i<data.length;i+=4){
     const r=data[i], g=data[i+1], b=data[i+2];
@@ -188,6 +194,7 @@ export default function App(){
   const regions=useMemo(()=>keyboardRect?buildPianoRegions(keyboardRect):[],[keyboardRect]);
 
   const rafRef=useRef<number|null>(null);
+  const autoResumeRef=useRef(0);
   const baselineRef=useRef<Map<number,number>>(new Map());
   const activeRef=useRef<Map<number,ActiveNote>>(new Map());
   const pendingOnRef=useRef<Map<number,number>>(new Map());
@@ -362,10 +369,17 @@ export default function App(){
     }
 
     if(!v.paused && !v.ended){
+      autoResumeRef.current = 0;
       rafRef.current=requestAnimationFrame(loop);
     } else {
-      setIsAnalyzing(false);
-      setStatus("解析停止");
+      if (!v.ended && autoResumeRef.current < 10) {
+        autoResumeRef.current += 1;
+        v.play().catch(()=>{});
+        rafRef.current=requestAnimationFrame(loop);
+      } else {
+        setIsAnalyzing(false);
+        setStatus(v.ended ? "解析完了（動画末尾）" : "解析停止");
+      }
     }
   }
 
@@ -378,6 +392,7 @@ export default function App(){
     reset();
     setIsAnalyzing(true);
     setStatus("解析中");
+    autoResumeRef.current = 0;
     v.play();
     rafRef.current=requestAnimationFrame(loop);
   }
@@ -408,9 +423,9 @@ export default function App(){
     if (!c) return;
     const base = keyboardRect ?? { x: 0, y: Math.round(c.height * 0.62), w: c.width, h: Math.round(c.height * 0.34) };
     const next = { ...base, ...patch };
-    next.x = clamp(Math.round(next.x), 0, Math.max(0, c.width - 10));
+    next.x = clamp(Math.round(next.x), -Math.round(c.width * 0.25), Math.max(0, c.width - 10));
     next.y = clamp(Math.round(next.y), 0, Math.max(0, c.height - 10));
-    next.w = clamp(Math.round(next.w), 10, c.width - next.x);
+    next.w = clamp(Math.round(next.w), 10, Math.round(c.width * 1.5));
     next.h = clamp(Math.round(next.h), 10, c.height - next.y);
     setKeyboardRect(next);
   }
@@ -580,7 +595,7 @@ export default function App(){
                   <input className="control-input" type="range" min={0} max={canvasRef.current?.height ?? 1} value={keyboardRect.y} onChange={e=>updateKeyboardRect({y:+e.target.value})}/>
                 </label>
                 <label className="control-group">keyboard W {Math.round(keyboardRect.w)}
-                  <input className="control-input" type="range" min={50} max={canvasRef.current?.width ?? 50} value={keyboardRect.w} onChange={e=>updateKeyboardRect({w:+e.target.value})}/>
+                  <input className="control-input" type="range" min={50} max={Math.round((canvasRef.current?.width ?? 100) * 1.5)} value={keyboardRect.w} onChange={e=>updateKeyboardRect({w:+e.target.value})}/>
                 </label>
                 <label className="control-group">keyboard H {Math.round(keyboardRect.h)}
                   <input className="control-input" type="range" min={30} max={canvasRef.current?.height ?? 30} value={keyboardRect.h} onChange={e=>updateKeyboardRect({h:+e.target.value})}/>
