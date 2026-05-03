@@ -428,16 +428,17 @@ export default function App(){
   }, [videoUrl, keyboardRect, dragRect, regions, hitLineOffset]);
 
   return (
-    <div className="min-h-screen bg-slate-950 p-4 text-slate-100">
-      <div className="mx-auto max-w-6xl space-y-4">
+    <div className="app-shell">
+      <div className="app-container">
         <div>
-          <h1 className="text-2xl font-bold">Perfect Piano Video → MIDI</h1>
-          <p className="text-slate-400">Synthesia / Ember風動画からMIDIを生成</p>
+          <h1 className="app-title">Perfect Piano Video → MIDI</h1>
+          <p className="app-subtitle">Synthesia / Ember風動画からMIDIを生成</p>
         </div>
 
-        <div className="grid gap-4 md:grid-cols-[1fr_320px]">
-          <div className="space-y-3 rounded-2xl bg-slate-900 p-4">
+        <div className="layout-grid">
+          <div className="video-panel">
             <input
+              className="file-input"
               type="file"
               accept="video/*"
               onChange={e=>{
@@ -458,12 +459,12 @@ export default function App(){
               onSeeked={drawFrame}
               onPause={drawFrame}
               controls
-              className="w-full rounded-xl bg-black"
+              className="video-preview"
             />
 
             <canvas
               ref={canvasRef}
-              className="w-full cursor-crosshair rounded-xl border border-slate-700 bg-black"
+              className="canvas-preview"
               onPointerDown={e=>{
                 const p=canvasPoint(e);
                 setDragStart(p);
@@ -489,50 +490,50 @@ export default function App(){
             />
           </div>
 
-          <div className="space-y-4 rounded-2xl bg-slate-900 p-4">
-            <div className="rounded-xl bg-slate-800 p-3 text-sm">{status}</div>
+          <div className="control-panel">
+            <div className="status-box">{status}</div>
 
-            <label className="block text-sm">
+            <label className="control-group">
               検出モード
-              <select className="mt-1 w-full" value={mode} onChange={e=>setMode(e.target.value as DetectionMode)}>
+              <select className="control-input" value={mode} onChange={e=>setMode(e.target.value as DetectionMode)}>
                 <option value="hybrid">Hybrid: 落下ノーツ + 発光</option>
                 <option value="falling">Falling: 落下ノーツのみ</option>
                 <option value="glow">Glow: 発光のみ</option>
               </select>
             </label>
 
-            <label className="block text-sm">threshold {threshold}
-              <input className="w-full" type="range" min={5} max={60} value={threshold} onChange={e=>setThreshold(+e.target.value)}/>
+            <label className="control-group">threshold {threshold}
+              <input className="control-input" type="range" min={5} max={60} value={threshold} onChange={e=>setThreshold(+e.target.value)}/>
             </label>
 
-            <label className="block text-sm">line offset {hitLineOffset}%
-              <input className="w-full" type="range" min={2} max={60} value={hitLineOffset} onChange={e=>setHitLineOffset(+e.target.value)}/>
+            <label className="control-group">line offset {hitLineOffset}%
+              <input className="control-input" type="range" min={2} max={60} value={hitLineOffset} onChange={e=>setHitLineOffset(+e.target.value)}/>
             </label>
 
-            <label className="block text-sm">line height {lineHeight}px
-              <input className="w-full" type="range" min={1} max={16} value={lineHeight} onChange={e=>setLineHeight(+e.target.value)}/>
+            <label className="control-group">line height {lineHeight}px
+              <input className="control-input" type="range" min={1} max={16} value={lineHeight} onChange={e=>setLineHeight(+e.target.value)}/>
             </label>
 
-            <label className="block text-sm">color strict {colorStrictness}
-              <input className="w-full" type="range" min={0} max={40} value={colorStrictness} onChange={e=>setColorStrictness(+e.target.value)}/>
+            <label className="control-group">color strict {colorStrictness}
+              <input className="control-input" type="range" min={0} max={40} value={colorStrictness} onChange={e=>setColorStrictness(+e.target.value)}/>
             </label>
 
-            <label className="block text-sm">confirm frames {confirmFrames}
-              <input className="w-full" type="range" min={1} max={5} value={confirmFrames} onChange={e=>setConfirmFrames(+e.target.value)}/>
+            <label className="control-group">confirm frames {confirmFrames}
+              <input className="control-input" type="range" min={1} max={5} value={confirmFrames} onChange={e=>setConfirmFrames(+e.target.value)}/>
             </label>
 
-            <label className="block text-sm">min note {minNoteMs}ms
-              <input className="w-full" type="range" min={10} max={160} value={minNoteMs} onChange={e=>setMinNoteMs(+e.target.value)}/>
+            <label className="control-group">min note {minNoteMs}ms
+              <input className="control-input" type="range" min={10} max={160} value={minNoteMs} onChange={e=>setMinNoteMs(+e.target.value)}/>
             </label>
 
-            <div className="grid grid-cols-2 gap-2">
-              <button className="bg-cyan-500 text-slate-950" onClick={start} disabled={isAnalyzing}>start</button>
-              <button onClick={stop} disabled={!isAnalyzing}>stop</button>
-              <button className="col-span-2 bg-emerald-500 text-slate-950" onClick={exportMidi}>export MIDI</button>
+            <div className="button-grid">
+              <button className="btn btn-primary" onClick={start} disabled={isAnalyzing}>start</button>
+              <button className="btn" onClick={stop} disabled={!isAnalyzing}>stop</button>
+              <button className="btn btn-success button-wide" onClick={exportMidi}>export MIDI</button>
             </div>
-            <p className="text-xs text-slate-400">Tip: Hybrid + confirm frames 2-3 + min note 40-70ms がSynthesiaで安定しやすいです。</p>
+            <p className="help-text">Tip: Hybrid + confirm frames 2-3 + min note 40-70ms がSynthesiaで安定しやすいです。</p>
 
-            <div className="text-sm text-slate-300">notes: {eventCount}</div>
+            <div className="notes-count">notes: {eventCount}</div>
           </div>
         </div>
       </div>
