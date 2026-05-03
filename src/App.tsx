@@ -10,6 +10,7 @@ type NoteEvent = { midi: number; startMs: number; endMs: number; velocity: numbe
 type ActiveNote = { startMs: number; maxStrength: number; frames: number };
 
 type DetectionMode = "hybrid" | "falling" | "glow";
+type ColorMode = "key" | "hand" | "both";
 
 const BLACK_NOTE_INDEXES = new Set([1, 3, 6, 8, 10]);
 const NOTE_NAMES = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
@@ -81,8 +82,25 @@ function rgbToHsv(r:number,g:number,b:number){
   const v=max;
   return {h,s,v};
 }
+const hexToRgb = (hex: string) => {
+  const n = hex.replace("#", "");
+  const full = n.length === 3 ? n.split("").map((c) => c + c).join("") : n;
+  const v = parseInt(full, 16);
+  return { r: (v >> 16) & 255, g: (v >> 8) & 255, b: v & 255 };
+};
+const hueDistance = (a: number, b: number) => {
+  const d = Math.abs(a - b) % 360;
+  return d > 180 ? 360 - d : d;
+};
 
-function scanLine(ctx:CanvasRenderingContext2D, key:KeyRegion, y:number, h:number, strict:number){
+function scanLine(
+  ctx:CanvasRenderingContext2D,
+  key:KeyRegion,
+  y:number,
+  h:number,
+  strict:number,
+  targetHue:number
+){
   const x=Math.max(0,Math.floor(key.x+key.w*0.1));
   const yy=Math.max(0,Math.floor(y));
   const maxW = Math.max(1, ctx.canvas.width - x);
@@ -93,9 +111,11 @@ function scanLine(ctx:CanvasRenderingContext2D, key:KeyRegion, y:number, h:numbe
   let col=0, bri=0, str=0, cnt=0;
   for(let i=0;i<data.length;i+=4){
     const r=data[i], g=data[i+1], b=data[i+2];
-    const {s,v}=rgbToHsv(r,g,b);
+    const hsv=rgbToHsv(r,g,b);
+    const {s,v}=hsv;
     const l=0.2126*r+0.7152*g+0.0722*b;
-    const ch = s>0.16+strict*0.006 && v>0.25;
+    const hueHit = hueDistance(hsv.h, targetHue) < 30 + strict * 0.6;
+    const ch = s>0.16+strict*0.006 && v>0.25 && hueHit;
     const bh = l>125+strict*1.5;
     if(ch) col++;
     if(bh) bri++;
@@ -186,6 +206,12 @@ export default function App(){
   const [hitLineOffset,setHitLineOffset]=useState(14);
   const [lineHeight,setLineHeight]=useState(4);
   const [colorStrictness,setColorStrictness]=useState(10);
+  const [whiteNoteColor, setWhiteNoteColor] = useState("#49b8ff");
+  const [blackNoteColor, setBlackNoteColor] = useState("#ff5cc8");
+  const [leftHandColor, setLeftHandColor] = useState("#4aa3ff");
+  const [rightHandColor, setRightHandColor] = useState("#ffb347");
+  const [colorMode, setColorMode] = useState<ColorMode>("both");
+  const [handSplit, setHandSplit] = useState(50);
   const [confirmFrames,setConfirmFrames]=useState(2);
 
   const [status,setStatus]=useState("動画を読み込んで、Canvasで鍵盤範囲をドラッグ指定");
@@ -284,7 +310,19 @@ export default function App(){
       const glow=getLumaScore(ctx,key);
       const base=baselineRef.current.get(key.midi) ?? glow;
       const gdiff=glow-base;
-      const fall= keyboardRect ? scanLine(ctx,key,hitY,lineHeight,colorStrictness) : {ratio:0,strength:0};
+      const wc = hexToRgb(whiteNoteColor);
+      const bc = hexToRgb(blackNoteColor);
+      const lc = hexToRgb(leftHandColor);
+      const rc = hexToRgb(rightHandColor);
+      const whiteHue = rgbToHsv(wc.r, wc.g, wc.b).h;
+      const blackHue = rgbToHsv(bc.r, bc.g, bc.b).h;
+      const leftHue = rgbToHsv(lc.r, lc.g, lc.b).h;
+      const rightHue = rgbToHsv(rc.r, rc.g, rc.b).h;
+      const keyHue = key.isBlack ? blackHue : whiteHue;
+      const splitX = keyboardRect ? keyboardRect.x + keyboardRect.w * (handSplit / 100) : c.width * 0.5;
+      const handHue = (key.x + key.w * 0.5) < splitX ? leftHue : rightHue;
+      const targetHue = colorMode === "key" ? keyHue : colorMode === "hand" ? handHue : (keyHue + handHue) * 0.5;
+      const fall= keyboardRect ? scanLine(ctx,key,hitY,lineHeight,colorStrictness,targetHue) : {ratio:0,strength:0};
 
       const fallOn=fall.ratio>threshold/100;
       const fallOff=fall.ratio<threshold/220;
@@ -574,6 +612,29 @@ export default function App(){
 
             <label className="control-group">color strict {colorStrictness}
               <input className="control-input" type="range" min={0} max={40} value={colorStrictness} onChange={e=>setColorStrictness(+e.target.value)}/>
+            </label>
+            <label className="control-group">
+              色モード
+              <select className="control-input" value={colorMode} onChange={e=>setColorMode(e.target.value as ColorMode)}>
+                <option value="both">鍵盤色 + 手色（Synthesia推奨）</option>
+                <option value="key">鍵盤色のみ</option>
+                <option value="hand">手色のみ</option>
+              </select>
+            </label>
+            <label className="control-group">白鍵ノーツ色
+              <input className="control-input" type="color" value={whiteNoteColor} onChange={e=>setWhiteNoteColor(e.target.value)} />
+            </label>
+            <label className="control-group">黒鍵ノーツ色
+              <input className="control-input" type="color" value={blackNoteColor} onChange={e=>setBlackNoteColor(e.target.value)} />
+            </label>
+            <label className="control-group">左手ノーツ色
+              <input className="control-input" type="color" value={leftHandColor} onChange={e=>setLeftHandColor(e.target.value)} />
+            </label>
+            <label className="control-group">右手ノーツ色
+              <input className="control-input" type="color" value={rightHandColor} onChange={e=>setRightHandColor(e.target.value)} />
+            </label>
+            <label className="control-group">左右分割位置 {handSplit}%
+              <input className="control-input" type="range" min={20} max={80} value={handSplit} onChange={e=>setHandSplit(+e.target.value)} />
             </label>
 
             <label className="control-group">confirm frames {confirmFrames}
