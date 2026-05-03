@@ -5,4 +5,4 @@ export default defineConfig({
   plugins: [react()],
   base: '/piano-video-to-midi/',
 });
-import { defineConfig } from 'vite'
+
