@@ -208,9 +208,11 @@ export default function App(){
   const [colorStrictness,setColorStrictness]=useState(10);
   const [whiteNoteColor, setWhiteNoteColor] = useState("#49b8ff");
   const [blackNoteColor, setBlackNoteColor] = useState("#ff5cc8");
-  const [leftHandColor, setLeftHandColor] = useState("#4aa3ff");
-  const [rightHandColor, setRightHandColor] = useState("#ffb347");
-  const [colorMode, setColorMode] = useState<ColorMode>("both");
+  const [leftHandColor, setLeftHandColor] = useState("#6fb8ff");
+  const [rightHandColor, setRightHandColor] = useState("#9bdc4b");
+  const [leftHandBlackColor, setLeftHandBlackColor] = useState("#3f7fc9");
+  const [rightHandBlackColor, setRightHandBlackColor] = useState("#6da12f");
+  const [colorMode, setColorMode] = useState<ColorMode>("hand");
   const [handSplit, setHandSplit] = useState(50);
   const [confirmFrames,setConfirmFrames]=useState(2);
 
@@ -314,13 +316,20 @@ export default function App(){
       const bc = hexToRgb(blackNoteColor);
       const lc = hexToRgb(leftHandColor);
       const rc = hexToRgb(rightHandColor);
+      const lbc = hexToRgb(leftHandBlackColor);
+      const rbc = hexToRgb(rightHandBlackColor);
       const whiteHue = rgbToHsv(wc.r, wc.g, wc.b).h;
       const blackHue = rgbToHsv(bc.r, bc.g, bc.b).h;
       const leftHue = rgbToHsv(lc.r, lc.g, lc.b).h;
       const rightHue = rgbToHsv(rc.r, rc.g, rc.b).h;
+      const leftBlackHue = rgbToHsv(lbc.r, lbc.g, lbc.b).h;
+      const rightBlackHue = rgbToHsv(rbc.r, rbc.g, rbc.b).h;
       const keyHue = key.isBlack ? blackHue : whiteHue;
       const splitX = keyboardRect ? keyboardRect.x + keyboardRect.w * (handSplit / 100) : c.width * 0.5;
-      const handHue = (key.x + key.w * 0.5) < splitX ? leftHue : rightHue;
+      const onLeft = (key.x + key.w * 0.5) < splitX;
+      const handHue = onLeft
+        ? (key.isBlack ? leftBlackHue : leftHue)
+        : (key.isBlack ? rightBlackHue : rightHue);
       const targetHue = colorMode === "key" ? keyHue : colorMode === "hand" ? handHue : (keyHue + handHue) * 0.5;
       const fall= keyboardRect ? scanLine(ctx,key,hitY,lineHeight,colorStrictness,targetHue) : {ratio:0,strength:0};
 
@@ -455,6 +464,16 @@ export default function App(){
       h: Math.round(autoH),
     });
     setStatus("鍵盤範囲を自動配置しました。必要なら下のスライダーで微調整してください。");
+  }
+  function applySynthesiaBlueGreenPreset() {
+    setColorMode("hand");
+    setLeftHandColor("#6fb8ff");
+    setRightHandColor("#9bdc4b");
+    setLeftHandBlackColor("#3f7fc9");
+    setRightHandBlackColor("#6da12f");
+    setColorStrictness(8);
+    setThreshold(16);
+    setStatus("Synthesia青/緑プリセットを適用しました。必要なら左右分割位置だけ調整してください。");
   }
 
   function updateKeyboardRect(patch: Partial<Rect>) {
@@ -630,8 +649,14 @@ export default function App(){
             <label className="control-group">左手ノーツ色
               <input className="control-input" type="color" value={leftHandColor} onChange={e=>setLeftHandColor(e.target.value)} />
             </label>
+            <label className="control-group">左手黒鍵ノーツ色（濃い色）
+              <input className="control-input" type="color" value={leftHandBlackColor} onChange={e=>setLeftHandBlackColor(e.target.value)} />
+            </label>
             <label className="control-group">右手ノーツ色
               <input className="control-input" type="color" value={rightHandColor} onChange={e=>setRightHandColor(e.target.value)} />
+            </label>
+            <label className="control-group">右手黒鍵ノーツ色（濃い色）
+              <input className="control-input" type="color" value={rightHandBlackColor} onChange={e=>setRightHandBlackColor(e.target.value)} />
             </label>
             <label className="control-group">左右分割位置 {handSplit}%
               <input className="control-input" type="range" min={20} max={80} value={handSplit} onChange={e=>setHandSplit(+e.target.value)} />
@@ -652,6 +677,7 @@ export default function App(){
             </div>
             <div className="button-grid">
               <button className="btn button-wide" onClick={fitKeyboardDefault}>鍵盤範囲を自動配置</button>
+              <button className="btn button-wide" onClick={applySynthesiaBlueGreenPreset}>Synthesia 青/緑プリセット</button>
             </div>
             {keyboardRect && (
               <div>
