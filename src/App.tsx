@@ -200,6 +200,7 @@ export default function App(){
   const pendingOnRef=useRef<Map<number,number>>(new Map());
   const pendingOffRef=useRef<Map<number,number>>(new Map());
   const eventsRef=useRef<NoteEvent[]>([]);
+  const videoUrlRef=useRef<string>("");
 
   function syncCanvasSize(){
     const v=videoRef.current, c=canvasRef.current;
@@ -471,10 +472,11 @@ export default function App(){
     };
   }
 
-  useEffect(()=>{
-    const t=setInterval(drawFrame,80);
-    return ()=>clearInterval(t);
-  }, [videoUrl, keyboardRect, dragRect, regions, hitLineOffset]);
+  useEffect(() => {
+    return () => {
+      if (videoUrlRef.current) URL.revokeObjectURL(videoUrlRef.current);
+    };
+  }, []);
 
   return (
     <div className="app-shell">
@@ -493,7 +495,9 @@ export default function App(){
               onChange={e=>{
                 const f=e.target.files?.[0];
                 if(!f) return;
-                setVideoUrl(URL.createObjectURL(f));
+                if (videoUrlRef.current) URL.revokeObjectURL(videoUrlRef.current);
+                videoUrlRef.current = URL.createObjectURL(f);
+                setVideoUrl(videoUrlRef.current);
                 setKeyboardRect(null);
                 setDragRect(null);
                 reset();
@@ -507,7 +511,9 @@ export default function App(){
               onLoadedMetadata={syncCanvasSize}
               onSeeked={drawFrame}
               onPause={drawFrame}
+              onTimeUpdate={() => { if (!isAnalyzing) drawFrame(); }}
               controls
+              playsInline
               className="video-preview"
             />
 
