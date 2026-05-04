@@ -8,6 +8,7 @@ type KeyRegion = Rect & { midi: number; name: string; isBlack: boolean };
 type NoteEvent = { midi: number; startMs: number; endMs: number; velocity: number };
 
 type ActiveNote = { startMs: number; maxStrength: number; frames: number };
+type SignalState = { fallEma: number; glowEma: number };
 
 type DetectionMode = "hybrid" | "falling" | "glow";
 type ColorMode = "key" | "hand" | "both";
@@ -143,6 +144,45 @@ function denoiseAndMerge(events: NoteEvent[], minNoteMs: number, gapMs = 22): No
   return merged.sort((a, b) => a.startMs - b.startMs || a.midi - b.midi);
 }
 
+function estimateKeyboardRect(ctx: CanvasRenderingContext2D): Rect {
+  const { width, height } = ctx.canvas;
+  const scanTop = Math.floor(height * 0.45);
+  const scanBottom = Math.floor(height * 0.98);
+  const rowStep = 2;
+  let bestY = Math.floor(height * 0.68);
+  let bestScore = -Infinity;
+
+  for (let y = scanTop; y < scanBottom; y += rowStep) {
+    const data = ctx.getImageData(0, y, width, 1).data;
+    let bright = 0;
+    let transitions = 0;
+    let prevOn = false;
+    for (let x = 0; x < width; x++) {
+      const i = x * 4;
+      const l = 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
+      const on = l > 150;
+      if (on) bright++;
+      if (x > 0 && on !== prevOn) transitions++;
+      prevOn = on;
+    }
+    const brightRatio = bright / Math.max(1, width);
+    const score = transitions * 0.9 + brightRatio * 140 - Math.abs(brightRatio - 0.52) * 180;
+    if (score > bestScore) {
+      bestScore = score;
+      bestY = y;
+    }
+  }
+
+  const top = clamp(Math.round(bestY - height * 0.11), Math.floor(height * 0.45), Math.floor(height * 0.9));
+  const h = clamp(Math.round(height * 0.34), 40, Math.round(height * 0.45));
+  return {
+    x: Math.round(width * 0.02),
+    y: top,
+    w: Math.round(width * 0.96),
+    h: Math.min(h, height - top - 4),
+  };
+}
+
 const clamp=(n:number,min:number,max:number)=>Math.max(min,Math.min(max,n));
 
 function writeVarLen(v:number){
@@ -227,6 +267,7 @@ export default function App(){
   const activeRef=useRef<Map<number,ActiveNote>>(new Map());
   const pendingOnRef=useRef<Map<number,number>>(new Map());
   const pendingOffRef=useRef<Map<number,number>>(new Map());
+  const signalRef=useRef<Map<number,SignalState>>(new Map());
   const eventsRef=useRef<NoteEvent[]>([]);
   const videoUrlRef=useRef<string>("");
 
@@ -238,13 +279,11 @@ export default function App(){
     c.width=Math.floor(vw*scale);
     c.height=Math.floor(vh*scale);
     if (!keyboardRect) {
-      const autoH = c.height * 0.34;
-      setKeyboardRect({
-        x: Math.round(c.width * 0.06),
-        y: Math.round(c.height - autoH - c.height * 0.03),
-        w: Math.round(c.width * 0.88),
-        h: Math.round(autoH),
-      });
+      const ctx = c.getContext("2d");
+      if (ctx) {
+        ctx.drawImage(v,0,0,c.width,c.height);
+        setKeyboardRect(estimateKeyboardRect(ctx));
+      }
     }
     drawFrame();
   }
@@ -294,6 +333,7 @@ export default function App(){
     activeRef.current.clear();
     pendingOnRef.current.clear();
     pendingOffRef.current.clear();
+    signalRef.current.clear();
     eventsRef.current=[];
     setEventCount(0);
   }
@@ -333,18 +373,23 @@ export default function App(){
       const targetHue = colorMode === "key" ? keyHue : colorMode === "hand" ? handHue : (keyHue + handHue) * 0.5;
       const fall= keyboardRect ? scanLine(ctx,key,hitY,lineHeight,colorStrictness,targetHue) : {ratio:0,strength:0};
 
-      const fallOn=fall.ratio>threshold/100;
-      const fallOff=fall.ratio<threshold/220;
-      const glowOn=gdiff>threshold;
-      const glowOff=gdiff<threshold*0.45;
+      const sig = signalRef.current.get(key.midi) ?? { fallEma: 0, glowEma: 0 };
+      sig.fallEma = sig.fallEma * 0.72 + fall.ratio * 0.28;
+      sig.glowEma = sig.glowEma * 0.78 + Math.max(0, gdiff) * 0.22;
+      signalRef.current.set(key.midi, sig);
 
-      const hybridOnScore = (fall.ratio * 100) + Math.max(0, gdiff) * 0.9;
-      const hybridOffScore = (fall.ratio * 100) + Math.max(0, gdiff) * 0.6;
+      const fallOn=sig.fallEma>threshold/105;
+      const fallOff=sig.fallEma<threshold/250;
+      const glowOn=sig.glowEma>threshold*0.82;
+      const glowOff=sig.glowEma<threshold*0.34;
+
+      const hybridOnScore = (sig.fallEma * 100) + sig.glowEma * 0.95;
+      const hybridOffScore = (sig.fallEma * 100) + sig.glowEma * 0.62;
       const shouldOn = mode==="hybrid"
-        ? (hybridOnScore > threshold * 1.5 || (fallOn && glowOn))
+        ? (hybridOnScore > threshold * 1.42 || (fallOn && glowOn))
         : mode==="falling" ? fallOn : glowOn;
       const shouldOff= mode==="hybrid"
-        ? (hybridOffScore < threshold * 0.95 && (fallOff || glowOff))
+        ? (hybridOffScore < threshold * 0.86 && (fallOff || glowOff))
         : mode==="falling" ? fallOff : glowOff;
 
       const strength=Math.max(gdiff,fall.strength);
@@ -455,14 +500,12 @@ export default function App(){
 
   function fitKeyboardDefault() {
     const c = canvasRef.current;
-    if (!c) return;
-    const autoH = c.height * 0.34;
-    setKeyboardRect({
-      x: Math.round(c.width * 0.06),
-      y: Math.round(c.height - autoH - c.height * 0.03),
-      w: Math.round(c.width * 0.88),
-      h: Math.round(autoH),
-    });
+    const v = videoRef.current;
+    if (!c || !v) return;
+    const ctx = c.getContext("2d");
+    if (!ctx) return;
+    ctx.drawImage(v,0,0,c.width,c.height);
+    setKeyboardRect(estimateKeyboardRect(ctx));
     setStatus("鍵盤範囲を自動配置しました。必要なら下のスライダーで微調整してください。");
   }
   function applySynthesiaBlueGreenPreset() {
@@ -474,6 +517,15 @@ export default function App(){
     setColorStrictness(8);
     setThreshold(16);
     setStatus("Synthesia青/緑プリセットを適用しました。必要なら左右分割位置だけ調整してください。");
+  }
+  function applyHighAccuracyPreset() {
+    setMode("hybrid");
+    setConfirmFrames(3);
+    setMinNoteMs(48);
+    setThreshold(20);
+    setLineHeight(5);
+    setColorStrictness(12);
+    setStatus("高精度プリセットを適用しました（取りこぼし減 / 誤検出抑制バランス）。");
   }
 
   function updateKeyboardRect(patch: Partial<Rect>) {
@@ -678,6 +730,7 @@ export default function App(){
             <div className="button-grid">
               <button className="btn button-wide" onClick={fitKeyboardDefault}>鍵盤範囲を自動配置</button>
               <button className="btn button-wide" onClick={applySynthesiaBlueGreenPreset}>Synthesia 青/緑プリセット</button>
+              <button className="btn button-wide" onClick={applyHighAccuracyPreset}>高精度プリセット</button>
             </div>
             {keyboardRect && (
               <div>
