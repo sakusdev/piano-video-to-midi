@@ -1,6 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import App from "./AppBlob";
+import App from "./AppAutoFit";
 import "./style.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
