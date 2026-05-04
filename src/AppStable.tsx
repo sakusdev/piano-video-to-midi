@@ -5,7 +5,6 @@ type KeyRegion = Rect & { midi: number; name: string; isBlack: boolean };
 type NoteEvent = { midi: number; startMs: number; endMs: number; velocity: number };
 type ActiveNote = { startMs: number; strength: number; onFrames: number; offFrames: number };
 type DetectionMode = "hybrid" | "falling" | "glow";
-
 type Hsv = { h: number; s: number; v: number };
 
 const BLACK_NOTES = new Set([1, 3, 6, 8, 10]);
@@ -260,11 +259,42 @@ function buildMidi(events: NoteEvent[], bpm = 120) {
 
 function estimateKeyboardRect(ctx: CanvasRenderingContext2D): Rect {
   const { width, height } = ctx.canvas;
+  const scanTop = Math.floor(height * 0.45);
+  const scanBottom = Math.floor(height * 0.98);
+  let bestY = Math.floor(height * 0.68);
+  let bestScore = -Infinity;
+
+  for (let y = scanTop; y < scanBottom; y += 2) {
+    const data = ctx.getImageData(0, y, width, 1).data;
+    let bright = 0;
+    let transitions = 0;
+    let prev = false;
+
+    for (let x = 0; x < width; x += 1) {
+      const i = x * 4;
+      const luma = 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
+      const on = luma > 145;
+      if (on) bright += 1;
+      if (x > 0 && on !== prev) transitions += 1;
+      prev = on;
+    }
+
+    const brightRatio = bright / Math.max(1, width);
+    const score = transitions * 0.85 + brightRatio * 130 - Math.abs(brightRatio - 0.5) * 160;
+    if (score > bestScore) {
+      bestScore = score;
+      bestY = y;
+    }
+  }
+
+  const h = clamp(Math.round(height * 0.3), 38, Math.round(height * 0.45));
+  const y = clamp(Math.round(bestY - h * 0.52), Math.round(height * 0.42), Math.max(0, height - h - 2));
+
   return {
-    x: Math.round(width * 0.02),
-    y: Math.round(height * 0.68),
-    w: Math.round(width * 0.96),
-    h: Math.round(height * 0.27),
+    x: Math.round(width * 0.015),
+    y,
+    w: Math.round(width * 0.97),
+    h,
   };
 }
 
@@ -272,6 +302,8 @@ export default function AppStable() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const rafRef = useRef<number | null>(null);
+  const resumeTimerRef = useRef<number | null>(null);
+  const analyzingRef = useRef(false);
   const videoUrlRef = useRef("");
   const lastFrameTimeRef = useRef(-1);
 
@@ -312,6 +344,33 @@ export default function AppStable() {
     eventsRef.current = [];
     lastFrameTimeRef.current = -1;
     setEventCount(0);
+  }
+
+  function scheduleResume(reason = "mobile-pause") {
+    const video = videoRef.current;
+    if (!video || !analyzingRef.current || video.ended) return;
+    if (resumeTimerRef.current !== null) return;
+
+    resumeTimerRef.current = window.setTimeout(() => {
+      resumeTimerRef.current = null;
+      if (!analyzingRef.current || !videoRef.current || videoRef.current.ended) return;
+      videoRef.current.play().catch(() => {
+        setStatus(`再生が一時停止しました。画面の再生ボタンを押すと解析を継続します。(${reason})`);
+      });
+      if (rafRef.current === null) rafRef.current = requestAnimationFrame(analyzeFrame);
+    }, 180);
+  }
+
+  function updateKeyboardRect(patch: Partial<Rect>) {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const base = keyboardRect ?? estimateKeyboardRect(canvas.getContext("2d")!);
+    const next = { ...base, ...patch };
+    next.x = clamp(Math.round(next.x), 0, Math.max(0, canvas.width - 10));
+    next.y = clamp(Math.round(next.y), 0, Math.max(0, canvas.height - 10));
+    next.w = clamp(Math.round(next.w), 10, canvas.width - next.x);
+    next.h = clamp(Math.round(next.h), 10, canvas.height - next.y);
+    setKeyboardRect(next);
   }
 
   function syncCanvasSize() {
@@ -384,10 +443,17 @@ export default function AppStable() {
   }
 
   function analyzeFrame() {
+    rafRef.current = null;
     const video = videoRef.current;
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext("2d");
-    if (!video || !canvas || !ctx || !keyboardRect) return;
+    if (!video || !canvas || !ctx || !keyboardRect || !analyzingRef.current) return;
+
+    if (video.paused && !video.ended) {
+      scheduleResume("pause-detected");
+      rafRef.current = requestAnimationFrame(analyzeFrame);
+      return;
+    }
 
     if (video.currentTime === lastFrameTimeRef.current) {
       rafRef.current = requestAnimationFrame(analyzeFrame);
@@ -457,10 +523,11 @@ export default function AppStable() {
     }
 
     drawFrame();
-    if (!video.paused && !video.ended) rafRef.current = requestAnimationFrame(analyzeFrame);
+    if (!video.ended) rafRef.current = requestAnimationFrame(analyzeFrame);
     else {
+      analyzingRef.current = false;
       setIsAnalyzing(false);
-      setStatus(video.ended ? "解析完了。MIDI出力できます。" : "解析停止。MIDI出力できます。");
+      setStatus("解析完了。MIDI出力できます。");
     }
   }
 
@@ -471,18 +538,23 @@ export default function AppStable() {
       return;
     }
     resetAnalysis();
+    analyzingRef.current = true;
     setIsAnalyzing(true);
-    setStatus("解析中。緑枠が検出中のノートです。");
+    setStatus("解析中。スマホで一時停止された場合は自動復帰を試します。");
     try {
+      video.setAttribute("playsinline", "true");
       await video.play();
-      rafRef.current = requestAnimationFrame(analyzeFrame);
+      if (rafRef.current === null) rafRef.current = requestAnimationFrame(analyzeFrame);
     } catch {
-      setIsAnalyzing(false);
-      setStatus("ブラウザが自動再生を止めました。動画の再生ボタンを押してからstartしてください。");
+      setStatus("再生ボタンを押してからstartしてください。スマホではユーザー操作なし再生が止められる場合があります。");
+      if (rafRef.current === null) rafRef.current = requestAnimationFrame(analyzeFrame);
     }
   }
 
   function stop() {
+    analyzingRef.current = false;
+    if (resumeTimerRef.current !== null) window.clearTimeout(resumeTimerRef.current);
+    resumeTimerRef.current = null;
     if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
     rafRef.current = null;
     videoRef.current?.pause();
@@ -521,7 +593,7 @@ export default function AppStable() {
     if (!canvas || !video || !ctx) return;
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
     setKeyboardRect(estimateKeyboardRect(ctx));
-    setStatus("鍵盤範囲を仮配置しました。必要ならCanvasをドラッグし直してください。");
+    setStatus("鍵盤範囲を仮配置しました。スマホでは下のX/Y/W/Hスライダーで微調整してください。");
   }
 
   function canvasPoint(e: React.PointerEvent<HTMLCanvasElement>) {
@@ -534,7 +606,13 @@ export default function AppStable() {
   }
 
   useEffect(() => {
+    drawFrame();
+  }, [keyboardRect, lineOffset, lineHeight, handSplit, regions.length]);
+
+  useEffect(() => {
     return () => {
+      analyzingRef.current = false;
+      if (resumeTimerRef.current !== null) window.clearTimeout(resumeTimerRef.current);
       if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
       if (videoUrlRef.current) URL.revokeObjectURL(videoUrlRef.current);
     };
@@ -545,7 +623,7 @@ export default function AppStable() {
       <div className="app-container">
         <div>
           <h1 className="app-title">Perfect Piano Video → MIDI</h1>
-          <p className="app-subtitle">信頼性重視版: 落下ノーツ色検出 + 鍵盤発光検出</p>
+          <p className="app-subtitle">モバイル優先版: 範囲スライダー + 再生自動復帰</p>
         </div>
 
         <div className="layout-grid">
@@ -564,7 +642,7 @@ export default function AppStable() {
                 setKeyboardRect(null);
                 setDragRect(null);
                 resetAnalysis();
-                setStatus("動画を読み込みました。Canvas上で鍵盤全体をドラッグ指定してください。");
+                setStatus("動画を読み込みました。Canvas上で鍵盤全体をドラッグ、または仮配置後にスライダー調整してください。");
               }}
             />
 
@@ -573,10 +651,17 @@ export default function AppStable() {
               src={videoUrl}
               controls
               playsInline
+              preload="auto"
               className="video-preview"
               onLoadedMetadata={syncCanvasSize}
               onSeeked={drawFrame}
-              onPause={drawFrame}
+              onPause={() => {
+                if (analyzingRef.current) scheduleResume("video-pause-event");
+                else drawFrame();
+              }}
+              onPlay={() => {
+                if (analyzingRef.current && rafRef.current === null) rafRef.current = requestAnimationFrame(analyzeFrame);
+              }}
             />
 
             <canvas
@@ -623,6 +708,12 @@ export default function AppStable() {
               </select>
             </label>
 
+            <div className="status-box">鍵盤範囲 微調整</div>
+            <label className="control-group">X {keyboardRect?.x ?? 0}<input className="control-input" type="range" min={0} max={canvasRef.current?.width ?? 960} value={keyboardRect?.x ?? 0} onChange={(e) => updateKeyboardRect({ x: Number(e.target.value) })} /></label>
+            <label className="control-group">Y {keyboardRect?.y ?? 0}<input className="control-input" type="range" min={0} max={canvasRef.current?.height ?? 540} value={keyboardRect?.y ?? 0} onChange={(e) => updateKeyboardRect({ y: Number(e.target.value) })} /></label>
+            <label className="control-group">W {keyboardRect?.w ?? 0}<input className="control-input" type="range" min={10} max={canvasRef.current?.width ?? 960} value={keyboardRect?.w ?? 10} onChange={(e) => updateKeyboardRect({ w: Number(e.target.value) })} /></label>
+            <label className="control-group">H {keyboardRect?.h ?? 0}<input className="control-input" type="range" min={10} max={canvasRef.current?.height ?? 540} value={keyboardRect?.h ?? 10} onChange={(e) => updateKeyboardRect({ h: Number(e.target.value) })} /></label>
+
             <label className="control-group">左手色 <input className="control-input" type="color" value={leftColor} onChange={(e) => setLeftColor(e.target.value)} /></label>
             <label className="control-group">右手色 <input className="control-input" type="color" value={rightColor} onChange={(e) => setRightColor(e.target.value)} /></label>
 
@@ -641,7 +732,7 @@ export default function AppStable() {
             </div>
 
             <div className="notes-count">notes: {eventCount}</div>
-            <p className="help-text">誤検知する: threshold/color strict/confirm framesを上げる。反応しない: threshold/color strictを下げる。</p>
+            <p className="help-text">スマホでは「仮配置→X/Y/W/H→line offset」の順で合わせるのが安定。</p>
           </div>
         </div>
       </div>
