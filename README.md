@@ -123,6 +123,17 @@ npm run build:electron
 
 `v0.1.0` のような `v*` タグをpushすると、同じworkflowがGitHub Releaseを作成し、各OSのElectronパッケージをrelease assetsとして添付します。
 
+## Android APK
+
+Android版はCapacitorで `dist/` をWebViewアプリとして包みます。
+
+```bash
+npm run sync:android
+npm run build:android
+```
+
+ローカルでAPKを作るにはAndroid SDKが必要です。GitHub Actionsの `Build Android APK` workflow は、`master` へのpushまたは手動実行で debug APK をビルドしてartifactとしてアップロードします。`v*` タグをpushした場合は、同じAPKをGitHub Releaseにも添付します。
+
 ## Privacy
 
 動画解析はブラウザ内で行われます。選択した動画ファイルは外部サーバーへアップロードされません。
