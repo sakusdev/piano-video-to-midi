@@ -12,6 +12,7 @@
 - 落下ノーツの色検出
 - 鍵盤発光による補助検出
 - 音声onsetによる連打・リズム補正
+- Electron版では音声FFTのspectral fluxも併用し、連打・和音・映像上で溶けるノーツの分割精度を補強
 - ロール/アルペジオのタイミング保持
 - 黒鍵誤検出を抑える `black guard`
 - 手動ドラッグとスライダーによる微調整
@@ -90,6 +91,7 @@ npm run dev
 連打やグリッサンドが抜ける:
 
 - 音声付き動画を使う
+- Electron版を使うと音声FFTも併用され、見た目で連続ノーツがつながる動画でも発音タイミングを拾いやすくなります
 - `confirm frames` を 1 にする
 - `line height` を少し上げる
 - `threshold` を少し下げる
@@ -108,6 +110,8 @@ npm run preview
 ```bash
 npm run electron:preview
 ```
+
+Electron版では動画解析に加えて音声FFTを使ったspectral flux onsetを併用します。通常の音量変化だけでは拾いにくい連打、和音、黒鍵を含む発音の切れ目を補助的に検出します。
 
 配布用パッケージを作る場合:
 
