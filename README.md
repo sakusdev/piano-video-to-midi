@@ -117,6 +117,8 @@ npm run build:electron
 
 生成物は `release/` に出力されます。GitHub Actionsの `Build Electron app` workflow は、`master` へのpushまたは手動実行で Windows / macOS / Linux 版をビルドし、artifactとしてアップロードします。
 
+`v0.1.0` のような `v*` タグをpushすると、同じworkflowがGitHub Releaseを作成し、各OSのElectronパッケージをrelease assetsとして添付します。
+
 ## Privacy
 
 動画解析はブラウザ内で行われます。選択した動画ファイルは外部サーバーへアップロードされません。
