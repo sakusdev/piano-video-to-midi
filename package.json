@@ -1,8 +1,16 @@
 {
+  "name": "piano-video-to-midi",
+  "version": "0.1.0",
+  "description": "Convert Synthesia-style piano videos to MIDI in the browser and Electron.",
+  "author": "sakusdev",
+  "private": true,
+  "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "electron:preview": "npm run build && electron .",
+    "build:electron": "npm run build && electron-builder --publish never"
   },
   "dependencies": {
     "@vitejs/plugin-react": "5.1.2",
@@ -13,6 +21,30 @@
   },
   "devDependencies": {
     "@types/react": "19.2.14",
-    "@types/react-dom": "19.2.3"
+    "@types/react-dom": "19.2.3",
+    "electron": "^42.0.1",
+    "electron-builder": "^26.8.1"
+  },
+  "build": {
+    "appId": "dev.sakus.piano-video-to-midi",
+    "productName": "Piano Video to MIDI",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis",
+      "signAndEditExecutable": false
+    },
+    "mac": {
+      "target": "dmg"
+    },
+    "linux": {
+      "target": "AppImage"
+    }
   }
 }

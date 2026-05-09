@@ -101,6 +101,22 @@ npm run build
 npm run preview
 ```
 
+## Electron
+
+ローカルでElectron版を確認する場合:
+
+```bash
+npm run electron:preview
+```
+
+配布用パッケージを作る場合:
+
+```bash
+npm run build:electron
+```
+
+生成物は `release/` に出力されます。GitHub Actionsの `Build Electron app` workflow は、`master` へのpushまたは手動実行で Windows / macOS / Linux 版をビルドし、artifactとしてアップロードします。
+
 ## Privacy
 
 動画解析はブラウザ内で行われます。選択した動画ファイルは外部サーバーへアップロードされません。
