@@ -46,7 +46,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: electron-${{ runner.os }}
-          path: release/**
+          path: |
+            release/*.zip
+            release/*.exe
+            release/*.dmg
+            release/*.AppImage
           if-no-files-found: error
 
   release-electron:

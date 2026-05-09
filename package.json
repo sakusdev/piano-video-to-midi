@@ -1,6 +1,6 @@
 {
   "name": "piano-video-to-midi",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Convert Synthesia-style piano videos to MIDI in the browser and Electron.",
   "author": "sakusdev",
   "private": true,
