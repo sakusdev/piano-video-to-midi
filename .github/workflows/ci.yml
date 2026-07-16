@@ -52,18 +52,21 @@ jobs:
         continue-on-error: true
         run: cargo fmt --manifest-path wasm/piano-core/Cargo.toml -- --check
 
-      - name: Generate rustfmt diagnostic patch
+      - name: Generate rustfmt diagnostic files
         if: steps.rustfmt.outcome == 'failure'
         run: |
           cargo fmt --manifest-path wasm/piano-core/Cargo.toml
           git diff -- wasm/piano-core > rustfmt.patch
 
-      - name: Upload rustfmt diagnostic patch
+      - name: Upload rustfmt diagnostics
         if: steps.rustfmt.outcome == 'failure'
         uses: actions/upload-artifact@v4
         with:
           name: rustfmt-diagnostic
-          path: rustfmt.patch
+          path: |
+            rustfmt.patch
+            wasm/piano-core/src/lib.rs
+            wasm/piano-core/tests/reliability.rs
           if-no-files-found: error
           retention-days: 7
 
