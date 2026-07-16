@@ -14,11 +14,13 @@ const generated = [
 const wasmPack = spawnSync("wasm-pack", ["--version"], { stdio: "ignore" });
 if (wasmPack.status !== 0) {
   if (generated.every(existsSync)) {
-    console.log("wasm-pack was not found; using the checked-in Rust/WASM build.");
-    process.exit(0);
+    console.log("wasm-pack was not found; reusing the existing Rust/WASM build.");
+  } else {
+    console.warn(
+      "wasm-pack was not found. Building the app without WASM; audio analysis will use the TypeScript Web Worker fallback.",
+    );
   }
-  console.error("wasm-pack is required because no checked-in WASM build is available.");
-  process.exit(1);
+  process.exit(0);
 }
 
 rmSync(output, { recursive: true, force: true });
