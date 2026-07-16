@@ -82,18 +82,18 @@ Rust環境がないローカル端末でもWebアプリ自体のビルドは継�
 
 ## Cloudflare Workers
 
-Web版はCloudflare Workers Static Assetsへそのままデプロイできます。Cloudflareはアプリの配信と`/api/health`だけを担当し、動画・音声・MIDI・解析結果はアップロードも保存もしません。R2、D1、KVは使用しません。
+Web版はCloudflare Workers Static Assetsへデプロイできます。Cloudflareはアプリの配信と`/api/health`だけを担当し、動画・音声・MIDI・解析結果はアップロードも保存もしません。R2、D1、KVは使用しません。
 
 ```bash
 npm run dev:cf
 npm run deploy:cf
 ```
 
-`wrangler.jsonc`のcustom buildが`npm run build:cf`を実行し、`dist/`を生成してからStatic Assetsとして配信します。SPA fallbackを有効にし、`run_worker_first: true`でWorkerからセキュリティヘッダーを付与します。
+`wrangler.jsonc`のcustom buildが`npm run build:cf`を実行します。Cloudflareのビルド環境にRustがなければminimal toolchainを、`wasm-pack`がなければ公式installerを導入し、RustソースからWASMを生成してからTypeScript型検査とViteビルドを実行します。
 
-CloudflareのGit連携を使う場合は、リポジトリを接続してデプロイコマンドを`npx wrangler@4 deploy`に設定します。ビルドコマンドはWrangler設定内で実行されるため、Cloudflare側では空欄で構いません。
+Static Assetsでは`dist/`を配信し、SPA fallbackを有効化しています。`run_worker_first: true`により、Workerが`/api/health`を処理し、HTML・JavaScript・Worker・WASMへセキュリティヘッダーとキャッシュ方針を付与します。
 
-Cloudflareの標準ビルド環境にRustや`wasm-pack`がなくてもWASM版を動かせるよう、CIで生成・検証した`public/wasm/`を同梱しています。Rust側を変更した場合は`npm run build:wasm`を実行し、生成物も更新してください。
+CloudflareのGit連携を使う場合はリポジトリを接続し、デプロイコマンドを`npx wrangler@4 deploy`に設定します。ビルドはWrangler設定のcustom buildから実行されるため、Cloudflare側の別のビルドコマンドは不要です。
 
 ## Build
 
@@ -102,7 +102,7 @@ npm run build
 npm run preview
 ```
 
-Pull Requestと`agent/**`ブランチではGitHub ActionsがRustテスト、WASM生成、TypeScriptの型検査、Viteビルドを実行します。
+Pull Requestと`agent/**`ブランチではGitHub ActionsがRustテスト、WASM生成、TypeScriptの型検査、Viteビルド、Wrangler dry-runを実行します。
 
 ## Electron
 
