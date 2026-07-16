@@ -1,5 +1,4 @@
 {
-  "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "piano-video-to-midi",
   "main": "src/cloudflare-worker.ts",
   "compatibility_date": "2026-07-16",
