@@ -8,6 +8,42 @@ fn clamp(value: f64, minimum: f64, maximum: f64) -> f64 {
     value.max(minimum).min(maximum)
 }
 
+fn hue_distance(left: f64, right: f64) -> f64 {
+    let distance = (left - right).abs() % 360.0;
+    if distance > 180.0 {
+        360.0 - distance
+    } else {
+        distance
+    }
+}
+
+fn rgb_to_hsv(red: u8, green: u8, blue: u8) -> (f64, f64, f64) {
+    let red = red as f64 / 255.0;
+    let green = green as f64 / 255.0;
+    let blue = blue as f64 / 255.0;
+    let maximum = red.max(green).max(blue);
+    let minimum = red.min(green).min(blue);
+    let delta = maximum - minimum;
+    let mut hue = 0.0;
+
+    if delta != 0.0 {
+        if maximum == red {
+            hue = ((green - blue) / delta) % 6.0;
+        } else if maximum == green {
+            hue = (blue - red) / delta + 2.0;
+        } else {
+            hue = (red - green) / delta + 4.0;
+        }
+        hue *= 60.0;
+        if hue < 0.0 {
+            hue += 360.0;
+        }
+    }
+
+    let saturation = if maximum == 0.0 { 0.0 } else { delta / maximum };
+    (hue, saturation, maximum)
+}
+
 fn fft(real: &mut [f64], imaginary: &mut [f64]) {
     let size = real.len();
     let mut swap_index = 0usize;
@@ -129,7 +165,7 @@ fn find_adaptive_onsets(envelope: &[f64], hop_ms: f64) -> Vec<f64> {
     packed
 }
 
-fn analyze(
+fn analyze_audio(
     samples: &[f32],
     sample_rate: u32,
     requested_fft_size: usize,
@@ -211,7 +247,113 @@ pub fn analyze_audio_onsets(
     fft_size: usize,
     hop_size: usize,
 ) -> Box<[f64]> {
-    analyze(samples, sample_rate, fft_size, hop_size).into_boxed_slice()
+    analyze_audio(samples, sample_rate, fft_size, hop_size).into_boxed_slice()
+}
+
+#[wasm_bindgen]
+pub fn analyze_color_columns(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    absolute_x: f64,
+    split_x: f64,
+    threshold: f64,
+    color_tolerance: f64,
+    left_hue: f64,
+    right_hue: f64,
+) -> Box<[f64]> {
+    if width == 0 || height == 0 || pixels.len() < width.saturating_mul(height).saturating_mul(4) {
+        return Vec::new().into_boxed_slice();
+    }
+
+    let minimum_saturation = 0.15 + color_tolerance * 0.006;
+    let minimum_value = 0.22 + color_tolerance * 0.002;
+    let hue_window = (34.0 - color_tolerance * 0.55).max(7.0);
+    let minimum_ratio = clamp(threshold / 115.0, 0.025, 0.7);
+    let mut packed = Vec::<f64>::new();
+
+    for local_x in 0..width {
+        let x = absolute_x + local_x as f64;
+        let target_hue = if x < split_x { left_hue } else { right_hue };
+        let mut hit_count = 0usize;
+        let mut strength = 0.0f64;
+        let mut dark_count = 0usize;
+
+        for local_y in 0..height {
+            let index = (local_y * width + local_x) * 4;
+            let red = pixels[index];
+            let green = pixels[index + 1];
+            let blue = pixels[index + 2];
+            let (hue, saturation, value) = rgb_to_hsv(red, green, blue);
+            if saturation < minimum_saturation
+                || value < minimum_value
+                || hue_distance(hue, target_hue) > hue_window
+            {
+                continue;
+            }
+
+            hit_count += 1;
+            let luma = 0.2126 * red as f64 + 0.7152 * green as f64 + 0.0722 * blue as f64;
+            strength += saturation * 86.0 + value * 28.0 + (120.0 - luma).max(0.0) * 0.08;
+            if luma < 118.0 || value < 0.46 {
+                dark_count += 1;
+            }
+        }
+
+        let score = hit_count as f64 / height as f64;
+        if score >= minimum_ratio {
+            packed.push(x);
+            packed.push(score);
+            packed.push(strength / hit_count.max(1) as f64);
+            packed.push(dark_count as f64 / hit_count.max(1) as f64);
+        }
+    }
+
+    packed.into_boxed_slice()
+}
+
+#[wasm_bindgen]
+pub fn measure_key_glow(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    key_rects: &[f64],
+) -> Box<[f64]> {
+    if width == 0 || height == 0 || pixels.len() < width.saturating_mul(height).saturating_mul(4) {
+        return Vec::new().into_boxed_slice();
+    }
+
+    let mut packed = Vec::<f64>::with_capacity(key_rects.len() / 5 * 2);
+    for key in key_rects.chunks_exact(5) {
+        let midi = key[0];
+        let x0 = clamp(key[1].floor(), 0.0, (width - 1) as f64) as usize;
+        let y0 = clamp(key[2].floor(), 0.0, (height - 1) as f64) as usize;
+        let x1 = clamp((key[1] + key[3]).ceil(), (x0 + 1) as f64, width as f64) as usize;
+        let y1 = clamp((key[2] + key[4]).ceil(), (y0 + 1) as f64, height as f64) as usize;
+        let mut sum = 0.0f64;
+        let mut hot = 0usize;
+        let mut count = 0usize;
+
+        for y in (y0..y1).step_by(2) {
+            for x in (x0..x1).step_by(2) {
+                let index = (y * width + x) * 4;
+                let luma = 0.2126 * pixels[index] as f64
+                    + 0.7152 * pixels[index + 1] as f64
+                    + 0.0722 * pixels[index + 2] as f64;
+                sum += luma;
+                if luma > 148.0 {
+                    hot += 1;
+                }
+                count += 1;
+            }
+        }
+
+        let count = count.max(1) as f64;
+        packed.push(midi);
+        packed.push(sum / count + hot as f64 / count * 72.0);
+    }
+
+    packed.into_boxed_slice()
 }
 
 #[wasm_bindgen]
@@ -244,10 +386,52 @@ mod tests {
                 samples[center + offset] = phase.sin() * (1.0 - offset as f32 / 512.0);
             }
         }
-        let packed = analyze(&samples, sample_rate, 2_048, 512);
+        let packed = analyze_audio(&samples, sample_rate, 2_048, 512);
         assert_eq!(packed.len() % 2, 0);
         assert!(packed.iter().all(|value| value.is_finite()));
         let times: Vec<f64> = packed.chunks_exact(2).map(|pair| pair[0]).collect();
         assert!(times.windows(2).all(|pair| pair[0] <= pair[1]));
+    }
+
+    #[test]
+    fn color_columns_detect_matching_hue() {
+        let width = 8usize;
+        let height = 4usize;
+        let mut pixels = vec![0u8; width * height * 4];
+        for y in 0..height {
+            for x in 2..6 {
+                let index = (y * width + x) * 4;
+                pixels[index] = 80;
+                pixels[index + 1] = 180;
+                pixels[index + 2] = 255;
+                pixels[index + 3] = 255;
+            }
+        }
+        let (target_hue, _, _) = rgb_to_hsv(80, 180, 255);
+        let packed = analyze_color_columns(
+            &pixels,
+            width,
+            height,
+            0.0,
+            4.0,
+            10.0,
+            8.0,
+            target_hue,
+            target_hue,
+        );
+        assert_eq!(packed.len(), 16);
+        assert!(packed.chunks_exact(4).all(|column| column[1] > 0.9));
+    }
+
+    #[test]
+    fn glow_measurement_returns_one_score_per_key() {
+        let width = 8usize;
+        let height = 8usize;
+        let pixels = vec![255u8; width * height * 4];
+        let keys = [60.0, 0.0, 0.0, 4.0, 8.0, 61.0, 4.0, 0.0, 4.0, 8.0];
+        let packed = measure_key_glow(&pixels, width, height, &keys);
+        assert_eq!(packed.len(), 4);
+        assert!(packed[1] > 255.0);
+        assert!(packed[3] > 255.0);
     }
 }
