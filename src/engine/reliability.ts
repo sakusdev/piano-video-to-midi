@@ -16,12 +16,19 @@ export type AnalysisFailureCode =
 export class AnalysisWorkerError extends Error {
   readonly code: AnalysisFailureCode;
   readonly recoverable: boolean;
+  readonly originalCause?: unknown;
 
-  constructor(code: AnalysisFailureCode, message: string, recoverable = true, options?: ErrorOptions) {
-    super(message, options);
+  constructor(
+    code: AnalysisFailureCode,
+    message: string,
+    recoverable = true,
+    originalCause?: unknown,
+  ) {
+    super(message);
     this.name = "AnalysisWorkerError";
     this.code = code;
     this.recoverable = recoverable;
+    this.originalCause = originalCause;
   }
 }
 
@@ -77,7 +84,14 @@ export function validatePackedCandidates(packed: Float64Array, keys: PianoKey[])
     if (!Number.isInteger(midi) || !expected.has(midi) || seen.has(midi)) {
       throw new AnalysisWorkerError("invalid-response", "映像解析候補のMIDI番号が不正です");
     }
-    if (strength < 0 || confidence < 0 || confidence > 1.000_001 || width <= 0 || darkRatio < 0 || darkRatio > 1.000_001) {
+    if (
+      strength < 0
+      || confidence < 0
+      || confidence > 1.000_001
+      || width <= 0
+      || darkRatio < 0
+      || darkRatio > 1.000_001
+    ) {
       throw new AnalysisWorkerError("invalid-response", "映像解析候補の数値範囲が不正です");
     }
     if (!Number.isFinite(centerX)) {
