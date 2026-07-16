@@ -1,10 +1,17 @@
 /// <reference lib="webworker" />
 
+import {
+  WASM_ENGINE_VERSION,
+  WORKER_PROTOCOL_VERSION,
+  errorMessage,
+  validatePackedOnsets,
+} from "../engine/reliability";
 import type { AudioOnset } from "../engine/types";
 
 type AnalyzeMessage = {
   kind: "analyze";
   id: number;
+  protocolVersion?: number;
   samples: Float32Array;
   sampleRate: number;
   wasmModuleUrl: string;
@@ -19,6 +26,7 @@ type WorkerRequest = AnalyzeMessage | CancelMessage;
 
 type WasmAudioModule = {
   default: (input?: unknown) => Promise<unknown>;
+  wasm_engine_version: () => string;
   analyze_audio_onsets: (
     samples: Float32Array,
     sampleRate: number,
@@ -32,6 +40,7 @@ type ProgressResponse = {
   id: number;
   progress: number;
   engine: "wasm" | "typescript";
+  protocolVersion: number;
 };
 
 type CompleteResponse = {
@@ -39,12 +48,17 @@ type CompleteResponse = {
   id: number;
   packedOnsets: Float64Array;
   engine: "wasm" | "typescript";
+  protocolVersion: number;
+  fallbackReason?: string;
+  elapsedMs: number;
 };
 
 type ErrorResponse = {
   kind: "error";
   id: number;
   message: string;
+  code: "invalid-input" | "analysis-failed";
+  protocolVersion: number;
 };
 
 const cancelled = new Set<number>();
@@ -52,7 +66,13 @@ let wasmModulePromise: Promise<WasmAudioModule> | null = null;
 let wasmModuleUrl = "";
 
 function postProgress(id: number, progress: number, engine: ProgressResponse["engine"]) {
-  const response: ProgressResponse = { kind: "progress", id, progress, engine };
+  const response: ProgressResponse = {
+    kind: "progress",
+    id,
+    progress,
+    engine,
+    protocolVersion: WORKER_PROTOCOL_VERSION,
+  };
   self.postMessage(response);
 }
 
@@ -219,20 +239,46 @@ async function loadWasm(url: string) {
   if (!wasmModulePromise || wasmModuleUrl !== url) {
     wasmModuleUrl = url;
     wasmModulePromise = (async () => {
-      const module = await import(/* @vite-ignore */ url) as unknown as WasmAudioModule;
+      const module = await Promise.race([
+        import(/* @vite-ignore */ url) as Promise<unknown>,
+        new Promise<never>((_, reject) => setTimeout(
+          () => reject(new Error("WASM module load timeout")),
+          15_000,
+        )),
+      ]) as WasmAudioModule;
       await module.default();
+      const version = module.wasm_engine_version();
+      if (version !== WASM_ENGINE_VERSION) {
+        throw new Error(`WASM version mismatch: expected ${WASM_ENGINE_VERSION}, received ${version}`);
+      }
       return module;
     })();
   }
   return wasmModulePromise;
 }
 
+function validateInput(message: AnalyzeMessage) {
+  if (message.protocolVersion !== undefined && message.protocolVersion !== WORKER_PROTOCOL_VERSION) {
+    throw new Error(`Worker protocol mismatch: ${String(message.protocolVersion)}`);
+  }
+  if (!(message.samples instanceof Float32Array) || !message.samples.length) {
+    throw new Error("Audio samples are empty or invalid");
+  }
+  if (!Number.isFinite(message.sampleRate) || message.sampleRate < 8_000 || message.sampleRate > 384_000) {
+    throw new Error("Audio sample rate is invalid");
+  }
+}
+
 async function analyze(message: AnalyzeMessage) {
+  const startedAt = performance.now();
   const { id, samples, sampleRate, wasmModuleUrl: moduleUrl } = message;
+  validateInput(message);
   const fftSize = 2048;
   const hopSize = 512;
+  const durationMs = samples.length / sampleRate * 1_000;
   let packedOnsets: Float64Array;
   let engine: CompleteResponse["engine"] = "wasm";
+  let fallbackReason: string | undefined;
 
   try {
     postProgress(id, 0.04, "wasm");
@@ -241,15 +287,26 @@ async function analyze(message: AnalyzeMessage) {
     packedOnsets = new Float64Array(
       module.analyze_audio_onsets(samples, sampleRate, fftSize, hopSize),
     );
+    validatePackedOnsets(packedOnsets, durationMs);
   } catch (error) {
     if (cancelled.has(id) || (error instanceof DOMException && error.name === "AbortError")) return;
     engine = "typescript";
+    fallbackReason = errorMessage(error);
     wasmModulePromise = null;
     packedOnsets = await analyzeWithTypeScript(id, samples, sampleRate, fftSize, hopSize);
+    validatePackedOnsets(packedOnsets, durationMs);
   }
 
   if (cancelled.has(id)) return;
-  const response: CompleteResponse = { kind: "complete", id, packedOnsets, engine };
+  const response: CompleteResponse = {
+    kind: "complete",
+    id,
+    packedOnsets,
+    engine,
+    protocolVersion: WORKER_PROTOCOL_VERSION,
+    fallbackReason,
+    elapsedMs: performance.now() - startedAt,
+  };
   self.postMessage(response, { transfer: [packedOnsets.buffer] });
 }
 
@@ -266,8 +323,14 @@ self.addEventListener("message", (event: MessageEvent<WorkerRequest>) => {
     const response: ErrorResponse = {
       kind: "error",
       id: message.id,
-      message: error instanceof Error ? error.message : String(error),
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      code: errorMessage(error).includes("invalid") || errorMessage(error).includes("mismatch")
+        ? "invalid-input"
+        : "analysis-failed",
+      message: errorMessage(error),
     };
     self.postMessage(response);
+  }).finally(() => {
+    cancelled.delete(message.id);
   });
 });
