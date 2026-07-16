@@ -68,7 +68,7 @@ npm run dev
 
 音声FFTとonset検出は、Rustから生成したWebAssemblyを専用Web Worker内で実行します。音声解析中もReactや動画プレビューのメインスレッドを占有しにくく、解析をキャンセルした場合はWorkerごと停止します。
 
-通常のビルドでは、リポジトリに含まれる生成済みWASMを利用できます。Rust側を変更する場合はRust toolchain、`wasm32-unknown-unknown` target、`wasm-pack`を用意してから実行します。
+Rust/WASMを生成するにはRust toolchain、`wasm32-unknown-unknown` target、`wasm-pack`を用意します。
 
 ```bash
 npm run build:wasm
@@ -76,7 +76,7 @@ npm run test:wasm
 npm run build
 ```
 
-WASMの読み込みや実行に失敗した環境では、同じWorker内のTypeScript実装へ自動的にフォールバックします。フォールバック時も重いFFTをUIスレッドでは実行しません。
+Rust環境がないローカル端末でもWebアプリ自体のビルドは継続し、同じWorker内のTypeScript実装へフォールバックします。GitHub Actions、Electron配布、Android APKではRust環境をセットアップしてWASMを必ず生成します。WASMの読み込みや実行に失敗した場合も、重いFFTがUIスレッドへ戻ることはありません。
 
 ## Build
 
@@ -94,7 +94,7 @@ npm run electron:preview
 npm run build:electron
 ```
 
-配布物は`release/`へ生成されます。
+配布物は`release/`へ生成されます。GitHub Actionsの各OS向け配布ビルドにはRust/WASMが含まれます。
 
 ## Android APK
 
@@ -103,7 +103,7 @@ npm run sync:android
 npm run build:android
 ```
 
-ローカルビルドにはAndroid SDKが必要です。GitHub Actionsからdebug APKも生成できます。
+ローカルビルドにはAndroid SDKが必要です。GitHub Actionsから生成するdebug APKにはRust/WASMが含まれます。
 
 ## Privacy
 
