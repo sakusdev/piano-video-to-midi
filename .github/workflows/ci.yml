@@ -23,8 +23,33 @@ jobs:
           node-version: 22
           cache: npm
 
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: wasm/piano-core
+
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@wasm-pack
+
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
 
+      - name: Test Rust core
+        run: npm run test:wasm
+
       - name: Type-check and build
         run: npm run build
+
+      - name: Upload generated WASM
+        uses: actions/upload-artifact@v4
+        with:
+          name: piano-wasm
+          path: |
+            public/wasm
+            wasm/piano-core/Cargo.lock
+          if-no-files-found: error
