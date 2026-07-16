@@ -192,8 +192,7 @@ fn analyze_audio(
 
     let window: Vec<f64> = (0..fft_size)
         .map(|index| {
-            0.5 - 0.5
-                * (2.0 * std::f64::consts::PI * index as f64 / (fft_size - 1) as f64).cos()
+            0.5 - 0.5 * (2.0 * std::f64::consts::PI * index as f64 / (fft_size - 1) as f64).cos()
         })
         .collect();
     let mut real = vec![0.0f64; fft_size];
@@ -409,15 +408,7 @@ mod tests {
         }
         let (target_hue, _, _) = rgb_to_hsv(80, 180, 255);
         let packed = analyze_color_columns(
-            &pixels,
-            width,
-            height,
-            0.0,
-            4.0,
-            10.0,
-            8.0,
-            target_hue,
-            target_hue,
+            &pixels, width, height, 0.0, 4.0, 10.0, 8.0, target_hue, target_hue,
         );
         assert_eq!(packed.len(), 16);
         assert!(packed.chunks_exact(4).all(|column| column[1] > 0.9));

@@ -11,13 +11,8 @@ fn public_abi_version_matches_package() {
 fn invalid_or_truncated_inputs_fail_closed() {
     assert!(analyze_audio_onsets(&[], 44_100, 2_048, 512).is_empty());
     assert!(analyze_audio_onsets(&[0.0; 4_096], 0, 2_048, 512).is_empty());
-    assert!(
-        analyze_color_columns(&[0; 15], 2, 2, 0.0, 1.0, 10.0, 8.0, 200.0, 100.0)
-            .is_empty()
-    );
-    assert!(
-        measure_key_glow(&[0; 15], 2, 2, &[60.0, 0.0, 0.0, 1.0, 1.0]).is_empty()
-    );
+    assert!(analyze_color_columns(&[0; 15], 2, 2, 0.0, 1.0, 10.0, 8.0, 200.0, 100.0).is_empty());
+    assert!(measure_key_glow(&[0; 15], 2, 2, &[60.0, 0.0, 0.0, 1.0, 1.0]).is_empty());
 }
 
 #[test]
@@ -56,15 +51,11 @@ fn vision_outputs_have_stable_tuple_shapes() {
         }
     }
 
-    let columns = analyze_color_columns(
-        &pixels, width, height, 0.0, 8.0, 10.0, 8.0, 198.0, 198.0,
-    );
+    let columns = analyze_color_columns(&pixels, width, height, 0.0, 8.0, 10.0, 8.0, 198.0, 198.0);
     assert_eq!(columns.len() % 4, 0);
     assert!(columns.iter().all(|value| value.is_finite()));
 
-    let rects = [
-        60.0, 0.0, 0.0, 8.0, 8.0, 61.0, 8.0, 0.0, 8.0, 8.0,
-    ];
+    let rects = [60.0, 0.0, 0.0, 8.0, 8.0, 61.0, 8.0, 0.0, 8.0, 8.0];
     let glow = measure_key_glow(&pixels, width, height, &rects);
     assert_eq!(glow.len(), 4);
     assert!(glow.iter().all(|value| value.is_finite()));
