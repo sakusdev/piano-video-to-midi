@@ -10,7 +10,7 @@
     "test:wasm": "cargo test --manifest-path wasm/piano-core/Cargo.toml",
     "dev": "npm run build:wasm && vite",
     "build": "npm run build:wasm && tsc -b && vite build",
-    "build:cf": "tsc -b && vite build",
+    "build:cf": "bash scripts/build-cloudflare.sh",
     "dev:cf": "npx wrangler@4 dev",
     "deploy:cf": "npx wrangler@4 deploy",
     "preview": "vite preview",
