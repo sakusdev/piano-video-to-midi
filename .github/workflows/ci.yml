@@ -75,7 +75,25 @@ jobs:
         run: exit 1
 
       - name: Run Clippy
-        run: cargo clippy --locked --manifest-path wasm/piano-core/Cargo.toml --all-targets -- -D warnings
+        id: clippy
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --locked --manifest-path wasm/piano-core/Cargo.toml --all-targets -- -D warnings 2>&1 | tee clippy.log
+
+      - name: Upload Clippy diagnostics
+        if: steps.clippy.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: clippy-diagnostic
+          path: clippy.log
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Fail on Clippy warnings
+        if: steps.clippy.outcome == 'failure'
+        run: exit 1
 
       - name: Test Rust core
         run: npm run test:wasm
