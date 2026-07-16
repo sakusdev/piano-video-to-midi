@@ -16,14 +16,16 @@
 
 ## 主な改善点
 
-- 1フレームにつき鍵盤領域をまとめて読み取る高速な画像解析
-- `requestVideoFrameCallback`を使った動画フレーム基準の解析
+- 1フレームにつき判定ラインと鍵盤領域をまとめて取得
+- 色列検出と鍵盤発光のピクセル走査をRust/WebAssembly + 専用Web Workerへ分離
+- `requestVideoFrameCallback`と非同期Worker応答を使った動画フレーム基準の解析
 - 高精度モードでは動画を低速再生し、処理落ちによるフレーム欠落を抑制
 - 複数フレームの中央値を使った鍵盤範囲の自動推定
 - 左右のノーツ色を動画から直接スポイト可能
-- 音声FFTとonset検出をRust/WebAssembly + 専用Web Workerへ分離
-- 音声バッファはTransferableとして渡し、メインスレッドでの巨大コピーを回避
-- WASMが使えない環境でも、Worker内TypeScript実装へ自動フォールバック
+- 音声FFTとonset検出も別のRust/WebAssembly Workerへ分離
+- ピクセル配列と音声バッファはTransferableとして渡し、巨大コピーを削減
+- 停止・動画変更・解析完了時には処理中のWorkerを終了し、古い結果を破棄
+- WASMが使えない環境でも、各Worker内のTypeScript実装へ自動フォールバック
 - 局所中央値/MADによる適応型onset閾値
 - 音声onsetがある同音連打は結合せず、映像上の短い途切れだけを統合
 - 和音を整列しながら、方向性のあるロール/アルペジオは保持
@@ -66,7 +68,7 @@ npm run dev
 
 ## Rust / WebAssembly engine
 
-音声FFTとonset検出は、Rustから生成したWebAssemblyを専用Web Worker内で実行します。音声解析中もReactや動画プレビューのメインスレッドを占有しにくく、解析をキャンセルした場合はWorkerごと停止します。
+音声FFT・onset検出・色列検出・鍵盤発光計測は、Rustから生成したWebAssemblyを専用Web Worker内で実行します。Reactと動画プレビューのメインスレッドは、動画フレームの描画と必要範囲の取得、結果表示を担当します。
 
 Rust/WASMを生成するにはRust toolchain、`wasm32-unknown-unknown` target、`wasm-pack`を用意します。
 
@@ -76,7 +78,7 @@ npm run test:wasm
 npm run build
 ```
 
-Rust環境がないローカル端末でもWebアプリ自体のビルドは継続し、同じWorker内のTypeScript実装へフォールバックします。GitHub Actions、Electron配布、Android APKではRust環境をセットアップしてWASMを必ず生成します。WASMの読み込みや実行に失敗した場合も、重いFFTがUIスレッドへ戻ることはありません。
+Rust環境がないローカル端末でもWebアプリ自体のビルドは継続し、同じWorker内のTypeScript実装へフォールバックします。GitHub Actions、Electron配布、Android APKではRust環境をセットアップしてWASMを必ず生成します。WASMの読み込みや実行に失敗した場合も、重いFFTやピクセル走査がUIスレッドへ戻ることはありません。
 
 ## Build
 
