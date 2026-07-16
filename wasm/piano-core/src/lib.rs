@@ -206,7 +206,7 @@ fn analyze_audio(
         .clamp(low_bin + 1, nyquist_bin);
     let mut previous_rms = 0.0f64;
 
-    for frame in 0..frame_count {
+    for (frame, frame_envelope) in envelope.iter_mut().enumerate() {
         let start = frame * hop_size;
         let mut energy = 0.0f64;
         for sample_index in 0..fft_size {
@@ -230,7 +230,7 @@ fn analyze_audio(
         let rms_rise = (rms - previous_rms).max(0.0);
         previous_rms = previous_rms * 0.7 + rms * 0.3;
         let bin_count = (high_bin - low_bin + 1) as f64;
-        envelope[frame] = flux / bin_count * 1.55
+        *frame_envelope = flux / bin_count * 1.55
             + rms_rise * 3.2
             + rms * 0.22
             + spectral_energy / bin_count * 0.01;
@@ -249,6 +249,8 @@ pub fn analyze_audio_onsets(
     analyze_audio(samples, sample_rate, fft_size, hop_size).into_boxed_slice()
 }
 
+// This flat scalar ABI is intentionally stable for the JavaScript/WASM boundary.
+#[allow(clippy::too_many_arguments)]
 #[wasm_bindgen]
 pub fn analyze_color_columns(
     pixels: &[u8],
