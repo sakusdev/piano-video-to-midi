@@ -10,9 +10,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: validate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,8 +29,9 @@ jobs:
           cache: npm
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.88.0
         with:
+          components: rustfmt, clippy
           targets: wasm32-unknown-unknown
 
       - name: Cache Rust build
@@ -35,9 +41,14 @@ jobs:
 
       - name: Install wasm-pack
         uses: taiki-e/install-action@wasm-pack
+        with:
+          tool: wasm-pack@0.13.1
 
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
+
+      - name: Check Rust formatting and lints
+        run: npm run lint:wasm
 
       - name: Test Rust core
         run: npm run test:wasm
@@ -45,7 +56,7 @@ jobs:
       - name: Validate Cloudflare build script
         run: bash -n scripts/build-cloudflare.sh
 
-      - name: Type-check and build
+      - name: Type-check, build, and verify artifacts
         run: npm run build
 
       - name: Validate Cloudflare Worker bundle
@@ -59,3 +70,4 @@ jobs:
             public/wasm
             wasm/piano-core/Cargo.lock
           if-no-files-found: error
+          retention-days: 14
