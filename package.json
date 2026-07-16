@@ -6,8 +6,10 @@
   "private": true,
   "main": "electron/main.cjs",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build:wasm": "node scripts/build-wasm.mjs",
+    "test:wasm": "cargo test --manifest-path wasm/piano-core/Cargo.toml",
+    "dev": "npm run build:wasm && vite",
+    "build": "npm run build:wasm && tsc -b && vite build",
     "preview": "vite preview",
     "electron:preview": "npm run build && electron .",
     "build:electron": "npm run build && electron-builder --publish never",
