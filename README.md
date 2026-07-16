@@ -21,7 +21,9 @@
 - 高精度モードでは動画を低速再生し、処理落ちによるフレーム欠落を抑制
 - 複数フレームの中央値を使った鍵盤範囲の自動推定
 - 左右のノーツ色を動画から直接スポイト可能
-- 音声FFTを小分けに実行し、UIを固めずにonsetを解析
+- 音声FFTとonset検出をRust/WebAssembly + 専用Web Workerへ分離
+- 音声バッファはTransferableとして渡し、メインスレッドでの巨大コピーを回避
+- WASMが使えない環境でも、Worker内TypeScript実装へ自動フォールバック
 - 局所中央値/MADによる適応型onset閾値
 - 音声onsetがある同音連打は結合せず、映像上の短い途切れだけを統合
 - 和音を整列しながら、方向性のあるロール/アルペジオは保持
@@ -62,6 +64,20 @@ npm run dev
 
 色の許容幅は、値を上げるほど指定色に厳しくなります。黒鍵が白鍵として検出される場合は黒鍵ガードを下げるのではなく、まずノーツ色と鍵盤範囲を確認してください。
 
+## Rust / WebAssembly engine
+
+音声FFTとonset検出は、Rustから生成したWebAssemblyを専用Web Worker内で実行します。音声解析中もReactや動画プレビューのメインスレッドを占有しにくく、解析をキャンセルした場合はWorkerごと停止します。
+
+通常のビルドでは、リポジトリに含まれる生成済みWASMを利用できます。Rust側を変更する場合はRust toolchain、`wasm32-unknown-unknown` target、`wasm-pack`を用意してから実行します。
+
+```bash
+npm run build:wasm
+npm run test:wasm
+npm run build
+```
+
+WASMの読み込みや実行に失敗した環境では、同じWorker内のTypeScript実装へ自動的にフォールバックします。フォールバック時も重いFFTをUIスレッドでは実行しません。
+
 ## Build
 
 ```bash
@@ -69,7 +85,7 @@ npm run build
 npm run preview
 ```
 
-Pull Requestと`agent/**`ブランチではGitHub ActionsがTypeScriptの型検査とViteビルドを実行します。
+Pull Requestと`agent/**`ブランチではGitHub ActionsがRustテスト、WASM生成、TypeScriptの型検査、Viteビルドを実行します。
 
 ## Electron
 
