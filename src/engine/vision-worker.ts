@@ -80,13 +80,9 @@ function unpackGlow(packed: Float64Array) {
 }
 
 export class VisionWorkerClient {
-  private worker: Worker;
+  private worker: Worker | null = null;
   private requestId = 1;
   private pending = new Map<number, PendingRequest>();
-
-  constructor() {
-    this.worker = this.createWorker();
-  }
 
   private createWorker() {
     const worker = new Worker(
@@ -112,8 +108,15 @@ export class VisionWorkerClient {
       const error = event.error ?? new Error(event.message);
       for (const pending of this.pending.values()) pending.reject(error);
       this.pending.clear();
+      worker.terminate();
+      if (this.worker === worker) this.worker = null;
     });
     return worker;
+  }
+
+  private ensureWorker() {
+    if (!this.worker) this.worker = this.createWorker();
+    return this.worker;
   }
 
   analyze(
@@ -145,7 +148,7 @@ export class VisionWorkerClient {
       this.pending.set(id, { resolve, reject });
     });
     const wasmModuleUrl = new URL("wasm/piano_core.js", document.baseURI).href;
-    this.worker.postMessage(
+    this.ensureWorker().postMessage(
       {
         kind: "analyze",
         id,
@@ -169,15 +172,16 @@ export class VisionWorkerClient {
   }
 
   reset() {
-    this.worker.terminate();
+    this.worker?.terminate();
+    this.worker = null;
     const error = new DOMException("Vision analysis cancelled", "AbortError");
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
-    this.worker = this.createWorker();
   }
 
   dispose() {
-    this.worker.terminate();
+    this.worker?.terminate();
+    this.worker = null;
     const error = new DOMException("Vision analysis disposed", "AbortError");
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
