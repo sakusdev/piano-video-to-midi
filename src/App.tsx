@@ -1,759 +1,704 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-// 自前MIDI + ハイブリッド検出（発光 + 落下ノーツ判定ライン）
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
+import { analyzeAudioOnsets, type AudioAnalysisProgress } from "./engine/audio";
+import {
+  buildPianoKeys,
+  clamp,
+  estimateKeyboardGeometry,
+  medianKeyboardGeometry,
+  midiName,
+} from "./engine/geometry";
+import { buildMidi } from "./engine/midi";
+import { finalizeNoteEvents } from "./engine/postprocess";
+import { hueFromHex } from "./engine/vision";
+import { FrameAnalyzer, type FrameAnalyzerSettings } from "./engine/frame-analyzer";
+import type {
+  AnalysisQuality,
+  AudioOnset,
+  DetectionMode,
+  KeyboardGeometry,
+  NoteEvent,
+  Rect,
+} from "./engine/types";
+import { PreviewPanel, type AudioStatus, type SampleTarget } from "./components/PreviewPanel";
+import { ControlPanel, type AppStage } from "./components/ControlPanel";
 
-type Rect = { x: number; y: number; w: number; h: number };
-
-type KeyRegion = Rect & { midi: number; name: string; isBlack: boolean };
-
-type NoteEvent = { midi: number; startMs: number; endMs: number; velocity: number };
-
-type ActiveNote = { startMs: number; maxStrength: number; frames: number };
-type SignalState = { fallEma: number; glowEma: number };
-
-type DetectionMode = "hybrid" | "falling" | "glow";
-type ColorMode = "key" | "hand" | "both";
-
-const BLACK_NOTE_INDEXES = new Set([1, 3, 6, 8, 10]);
-const NOTE_NAMES = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
-
-const isBlackMidi = (m: number) => BLACK_NOTE_INDEXES.has(m % 12);
-const midiToName = (m: number) => `${NOTE_NAMES[m % 12]}${Math.floor(m/12)-1}`;
-
-function whiteIndexToMidi(index: number) {
-  let c = -1;
-  for (let m=21;m<=108;m++){
-    if(!isBlackMidi(m)){c++; if(c===index) return m;}
-  }
-  return 108;
-}
-
-function buildPianoRegions(rect: Rect): KeyRegion[] {
-  const out: KeyRegion[] = [];
-  const w = rect.w/52;
-  let wi=0;
-  for(let m=21;m<=108;m++){
-    if(!isBlackMidi(m)){
-      out.push({midi:m,name:midiToName(m),isBlack:false,
-        x:rect.x+wi*w, y:rect.y+rect.h*0.58, w, h:rect.h*0.38});
-      wi++;
-    }
-  }
-  const blackAfter=new Set(["A","C","D","F","G"]);
-  for(let i=0;i<51;i++){
-    const lm=whiteIndexToMidi(i);
-    if(!blackAfter.has(NOTE_NAMES[lm%12])) continue;
-    const bm=lm+1; if(bm<21||bm>108) continue;
-    out.push({midi:bm,name:midiToName(bm),isBlack:true,
-      x:rect.x+(i+1)*w-w*0.3, y:rect.y+rect.h*0.04, w:w*0.6, h:rect.h*0.48});
-  }
-  return out.sort((a,b)=>Number(a.isBlack)-Number(b.isBlack));
-}
-
-function getLumaScore(ctx: CanvasRenderingContext2D, r: Rect){
-  const x=Math.max(0,Math.floor(r.x));
-  const y=Math.max(0,Math.floor(r.y));
-  const maxW = Math.max(1, ctx.canvas.width - x);
-  const maxH = Math.max(1, ctx.canvas.height - y);
-  const w=Math.max(1,Math.min(Math.floor(r.w), maxW));
-  const h=Math.max(1,Math.min(Math.floor(r.h), maxH));
-  const d=ctx.getImageData(x,y,w,h).data;
-  let sum=0, hot=0, c=0;
-  for(let yy=0;yy<h;yy+=2){
-    for(let xx=0;xx<w;xx+=2){
-      const i=(yy*w+xx)*4;
-      const l=0.2126*d[i]+0.7152*d[i+1]+0.0722*d[i+2];
-      sum+=l; if(l>145) hot++; c++;
-    }
-  }
-  return (sum/Math.max(1,c)) + (hot/Math.max(1,c))*80;
-}
-
-function rgbToHsv(r:number,g:number,b:number){
-  r/=255; g/=255; b/=255;
-  const max=Math.max(r,g,b), min=Math.min(r,g,b), d=max-min;
-  let h=0;
-  if(d!==0){
-    if(max===r) h=((g-b)/d)%6;
-    else if(max===g) h=(b-r)/d+2;
-    else h=(r-g)/d+4;
-    h*=60;
-    if(h<0) h+=360;
-  }
-  const s=max===0?0:d/max;
-  const v=max;
-  return {h,s,v};
-}
-const hexToRgb = (hex: string) => {
-  const n = hex.replace("#", "");
-  const full = n.length === 3 ? n.split("").map((c) => c + c).join("") : n;
-  const v = parseInt(full, 16);
-  return { r: (v >> 16) & 255, g: (v >> 8) & 255, b: v & 255 };
-};
-const hueDistance = (a: number, b: number) => {
-  const d = Math.abs(a - b) % 360;
-  return d > 180 ? 360 - d : d;
+const QUALITY_SETTINGS: Record<AnalysisQuality, { playbackRate: number; label: string; hint: string }> = {
+  fast: { playbackRate: 1.2, label: "高速", hint: "短い確認用。処理の軽さを優先します。" },
+  balanced: { playbackRate: 0.72, label: "標準", hint: "精度と速度のバランスを取ります。" },
+  accurate: { playbackRate: 0.38, label: "高精度", hint: "低速再生でフレーム欠落を抑えます。" },
 };
 
-function scanLine(
-  ctx:CanvasRenderingContext2D,
-  key:KeyRegion,
-  y:number,
-  h:number,
-  strict:number,
-  targetHue:number
-){
-  const x=Math.max(0,Math.floor(key.x+key.w*0.1));
-  const yy=Math.max(0,Math.floor(y));
-  const maxW = Math.max(1, ctx.canvas.width - x);
-  const maxH = Math.max(1, ctx.canvas.height - yy);
-  const w=Math.max(1,Math.min(Math.floor(key.w*0.8), maxW));
-  const hh=Math.max(1,Math.min(Math.floor(h), maxH));
-  const data=ctx.getImageData(x, yy, w, hh).data;
-  let col=0, bri=0, str=0, cnt=0;
-  for(let i=0;i<data.length;i+=4){
-    const r=data[i], g=data[i+1], b=data[i+2];
-    const hsv=rgbToHsv(r,g,b);
-    const {s,v}=hsv;
-    const l=0.2126*r+0.7152*g+0.0722*b;
-    const hueHit = hueDistance(hsv.h, targetHue) < 30 + strict * 0.6;
-    const ch = s>0.16+strict*0.006 && v>0.25 && hueHit;
-    const bh = l>125+strict*1.5;
-    if(ch) col++;
-    if(bh) bri++;
-    str += Math.max(ch ? s*100+v*35 : 0, bh ? (l-110)*0.75 : 0);
-    cnt++;
-  }
-  const cr=col/Math.max(1,cnt), br=bri/Math.max(1,cnt);
-  return { ratio: Math.max(cr, br*0.85), strength: str/Math.max(1,cnt) };
+const PRESETS = {
+  synthesia: {
+    left: "#6fb8ff",
+    right: "#9bdc4b",
+    threshold: 18,
+    colorTolerance: 14,
+    blackGuard: 58,
+    lineHeight: 7,
+  },
+  neon: {
+    left: "#27d7ff",
+    right: "#ff4dc4",
+    threshold: 15,
+    colorTolerance: 10,
+    blackGuard: 52,
+    lineHeight: 8,
+  },
+};
+
+function formatTime(seconds: number) {
+  if (!Number.isFinite(seconds)) return "0:00";
+  const minutes = Math.floor(seconds / 60);
+  const remaining = Math.floor(seconds % 60).toString().padStart(2, "0");
+  return `${minutes}:${remaining}`;
 }
 
-function denoiseAndMerge(events: NoteEvent[], minNoteMs: number, gapMs = 22): NoteEvent[] {
-  const sorted = [...events]
-    .filter((e) => e.endMs - e.startMs >= minNoteMs)
-    .sort((a, b) => a.midi - b.midi || a.startMs - b.startMs);
-  const merged: NoteEvent[] = [];
-  for (const e of sorted) {
-    const last = merged[merged.length - 1];
-    if (last && last.midi === e.midi && e.startMs - last.endMs <= gapMs) {
-      last.endMs = Math.max(last.endMs, e.endMs);
-      last.velocity = Math.max(last.velocity, e.velocity);
-      continue;
-    }
-    merged.push({ ...e });
-  }
-  return merged.sort((a, b) => a.startMs - b.startMs || a.midi - b.midi);
+function rgbToHex(red: number, green: number, blue: number) {
+  return `#${[red, green, blue]
+    .map((value) => clamp(Math.round(value), 0, 255).toString(16).padStart(2, "0"))
+    .join("")}`;
 }
 
-function estimateKeyboardRect(ctx: CanvasRenderingContext2D): Rect {
-  const { width, height } = ctx.canvas;
-  const scanTop = Math.floor(height * 0.45);
-  const scanBottom = Math.floor(height * 0.98);
-  const rowStep = 2;
-  let bestY = Math.floor(height * 0.68);
-  let bestScore = -Infinity;
-
-  for (let y = scanTop; y < scanBottom; y += rowStep) {
-    const data = ctx.getImageData(0, y, width, 1).data;
-    let bright = 0;
-    let transitions = 0;
-    let prevOn = false;
-    for (let x = 0; x < width; x++) {
-      const i = x * 4;
-      const l = 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
-      const on = l > 150;
-      if (on) bright++;
-      if (x > 0 && on !== prevOn) transitions++;
-      prevOn = on;
-    }
-    const brightRatio = bright / Math.max(1, width);
-    const score = transitions * 0.9 + brightRatio * 140 - Math.abs(brightRatio - 0.52) * 180;
-    if (score > bestScore) {
-      bestScore = score;
-      bestY = y;
-    }
-  }
-
-  const top = clamp(Math.round(bestY - height * 0.11), Math.floor(height * 0.45), Math.floor(height * 0.9));
-  const h = clamp(Math.round(height * 0.34), 40, Math.round(height * 0.45));
-  return {
-    x: Math.round(width * 0.02),
-    y: top,
-    w: Math.round(width * 0.96),
-    h: Math.min(h, height - top - 4),
-  };
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-const clamp=(n:number,min:number,max:number)=>Math.max(min,Math.min(max,n));
+export default function AppRhythm() {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const sourceUrlRef = useRef("");
+  const frameCallbackRef = useRef<number | null>(null);
+  const animationFrameRef = useRef<number | null>(null);
+  const runningRef = useRef(false);
+  const audioAbortRef = useRef<AbortController | null>(null);
+  const audioOnsetsRef = useRef<AudioOnset[]>([]);
+  const audioIndexRef = useRef(0);
+  const analyzerRef = useRef(new FrameAnalyzer());
 
-function writeVarLen(v:number){
-  let b=v&0x7f;
-  const out:number[]=[];
-  while((v>>=7)){
-    b<<=8;
-    b|=(v&0x7f)|0x80;
-  }
-  while(true){
-    out.push(b&0xff);
-    if(b&0x80) b>>=8;
-    else break;
-  }
-  return out;
-}
-const textBytes=(t:string)=>[...t].map(c=>c.charCodeAt(0));
-const u32=(n:number)=>[(n>>>24)&255,(n>>>16)&255,(n>>>8)&255,n&255];
-const u16=(n:number)=>[(n>>>8)&255,n&255];
+  const [sourceUrl, setSourceUrl] = useState("");
+  const [fileName, setFileName] = useState("");
+  const [keyboardRect, setKeyboardRect] = useState<Rect | null>(null);
+  const [keyboardConfidence, setKeyboardConfidence] = useState(0);
+  const [dragStart, setDragStart] = useState<{ x: number; y: number } | null>(null);
+  const [dragRect, setDragRect] = useState<Rect | null>(null);
+  const [sampleTarget, setSampleTarget] = useState<SampleTarget>(null);
+  const [stage, setStage] = useState<AppStage>("empty");
+  const [status, setStatus] = useState("動画を追加してください");
+  const [isRunning, setIsRunning] = useState(false);
+  const [duration, setDuration] = useState(0);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [progress, setProgress] = useState(0);
+  const [noteCount, setNoteCount] = useState(0);
+  const [recentEvents, setRecentEvents] = useState<NoteEvent[]>([]);
+  const [activeCount, setActiveCount] = useState(0);
 
-function buildExactMidi(events: NoteEvent[], bpm=120){
-  const ppq=480, tpm=(ppq*bpm)/60000;
-  type E={tick:number, order:number, bytes:number[]};
-  const raw:E[]=[];
-  const mpq=Math.round(60000000/bpm);
-  raw.push({tick:0,order:0,bytes:[0xff,0x51,0x03,(mpq>>>16)&255,(mpq>>>8)&255,mpq&255]});
-  for(const e of events){
-    const st=Math.max(0,Math.round(e.startMs*tpm));
-    const et=Math.max(st+1,Math.round(e.endMs*tpm));
-    const note=clamp(e.midi,0,127), vel=clamp(e.velocity,1,127);
-    raw.push({tick:st,order:2,bytes:[0x90,note,vel]});
-    raw.push({tick:et,order:1,bytes:[0x80,note,0]});
-  }
-  raw.sort((a,b)=>a.tick-b.tick||a.order-b.order||a.bytes[1]-b.bytes[1]);
-  let last=0;
-  const track:number[]=[];
-  for(const e of raw){
-    const d=Math.max(0,e.tick-last);
-    track.push(...writeVarLen(d),...e.bytes);
-    last=e.tick;
-  }
-  track.push(0x00,0xff,0x2f,0x00);
-  const header=[...textBytes("MThd"),...u32(6),...u16(0),...u16(1),...u16(ppq)];
-  const trk=[...textBytes("MTrk"),...u32(track.length),...track];
-  return new Uint8Array([...header,...trk]);
-}
+  const [audioStatus, setAudioStatus] = useState<AudioStatus>("idle");
+  const [audioProgress, setAudioProgress] = useState(0);
+  const [audioOnsetCount, setAudioOnsetCount] = useState(0);
 
-export default function App(){
-  const videoRef=useRef<HTMLVideoElement|null>(null);
-  const canvasRef=useRef<HTMLCanvasElement|null>(null);
-
-  const [videoUrl,setVideoUrl]=useState("");
-  const [keyboardRect,setKeyboardRect]=useState<Rect|null>(null);
-  const [dragStart,setDragStart]=useState<{x:number;y:number}|null>(null);
-  const [dragRect,setDragRect]=useState<Rect|null>(null);
-  const [isAnalyzing,setIsAnalyzing]=useState(false);
-
-  const [mode,setMode]=useState<DetectionMode>("hybrid");
-  const [threshold,setThreshold]=useState(18);
-  const [minNoteMs,setMinNoteMs]=useState(35);
-  const [hitLineOffset,setHitLineOffset]=useState(14);
-  const [lineHeight,setLineHeight]=useState(4);
-  const [colorStrictness,setColorStrictness]=useState(10);
-  const [whiteNoteColor, setWhiteNoteColor] = useState("#49b8ff");
-  const [blackNoteColor, setBlackNoteColor] = useState("#ff5cc8");
-  const [leftHandColor, setLeftHandColor] = useState("#6fb8ff");
-  const [rightHandColor, setRightHandColor] = useState("#9bdc4b");
-  const [leftHandBlackColor, setLeftHandBlackColor] = useState("#3f7fc9");
-  const [rightHandBlackColor, setRightHandBlackColor] = useState("#6da12f");
-  const [colorMode, setColorMode] = useState<ColorMode>("hand");
+  const [mode, setMode] = useState<DetectionMode>("balanced");
+  const [quality, setQuality] = useState<AnalysisQuality>("balanced");
+  const [leftColor, setLeftColor] = useState(PRESETS.synthesia.left);
+  const [rightColor, setRightColor] = useState(PRESETS.synthesia.right);
   const [handSplit, setHandSplit] = useState(50);
-  const [confirmFrames,setConfirmFrames]=useState(2);
+  const [threshold, setThreshold] = useState(PRESETS.synthesia.threshold);
+  const [colorTolerance, setColorTolerance] = useState(PRESETS.synthesia.colorTolerance);
+  const [blackGuard, setBlackGuard] = useState(PRESETS.synthesia.blackGuard);
+  const [lineOffset, setLineOffset] = useState(14);
+  const [lineHeight, setLineHeight] = useState(PRESETS.synthesia.lineHeight);
+  const [confirmFrames, setConfirmFrames] = useState(2);
+  const [minimumNoteMs, setMinimumNoteMs] = useState(38);
+  const [leadMs, setLeadMs] = useState(0);
+  const [bpm, setBpm] = useState(120);
 
-  const [status,setStatus]=useState("動画を読み込んで、Canvasで鍵盤範囲をドラッグ指定");
-  const [eventCount,setEventCount]=useState(0);
+  const keys = useMemo(
+    () => keyboardRect ? buildPianoKeys(keyboardRect) : [],
+    [keyboardRect],
+  );
+  const leftHue = useMemo(() => hueFromHex(leftColor), [leftColor]);
+  const rightHue = useMemo(() => hueFromHex(rightColor), [rightColor]);
 
-  const regions=useMemo(()=>keyboardRect?buildPianoRegions(keyboardRect):[],[keyboardRect]);
-
-  const rafRef=useRef<number|null>(null);
-  const autoResumeRef=useRef(0);
-  const baselineRef=useRef<Map<number,number>>(new Map());
-  const activeRef=useRef<Map<number,ActiveNote>>(new Map());
-  const pendingOnRef=useRef<Map<number,number>>(new Map());
-  const pendingOffRef=useRef<Map<number,number>>(new Map());
-  const signalRef=useRef<Map<number,SignalState>>(new Map());
-  const eventsRef=useRef<NoteEvent[]>([]);
-  const videoUrlRef=useRef<string>("");
-
-  function syncCanvasSize(){
-    const v=videoRef.current, c=canvasRef.current;
-    if(!v||!c) return;
-    const vw=v.videoWidth||1280, vh=v.videoHeight||720;
-    const scale=Math.min(1,960/vw);
-    c.width=Math.floor(vw*scale);
-    c.height=Math.floor(vh*scale);
-    if (!keyboardRect) {
-      const ctx = c.getContext("2d");
-      if (ctx) {
-        ctx.drawImage(v,0,0,c.width,c.height);
-        setKeyboardRect(estimateKeyboardRect(ctx));
-      }
+  const cancelScheduledFrame = () => {
+    const video = videoRef.current as (HTMLVideoElement & {
+      cancelVideoFrameCallback?: (handle: number) => void;
+    }) | null;
+    if (frameCallbackRef.current !== null && video?.cancelVideoFrameCallback) {
+      video.cancelVideoFrameCallback(frameCallbackRef.current);
     }
-    drawFrame();
-  }
+    if (animationFrameRef.current !== null) cancelAnimationFrame(animationFrameRef.current);
+    frameCallbackRef.current = null;
+    animationFrameRef.current = null;
+  };
 
-  function drawFrame(){
-    const v=videoRef.current, c=canvasRef.current;
-    if(!v||!c) return;
-    const ctx=c.getContext("2d");
-    if(!ctx) return;
-    ctx.clearRect(0,0,c.width,c.height);
-    ctx.drawImage(v,0,0,c.width,c.height);
+  const resetAnalysis = () => {
+    analyzerRef.current.reset();
+    audioIndexRef.current = 0;
+    setNoteCount(0);
+    setRecentEvents([]);
+    setActiveCount(0);
+    setProgress(0);
+  };
 
-    if(keyboardRect){
-      ctx.save();
-      ctx.strokeStyle="#22d3ee";
-      ctx.lineWidth=2;
-      ctx.strokeRect(keyboardRect.x,keyboardRect.y,keyboardRect.w,keyboardRect.h);
+  const drawFrame = () => {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    const context = canvas?.getContext("2d");
+    if (!video || !canvas || !context || !canvas.width || !canvas.height) return;
 
-      for(const r of regions){
-        ctx.globalAlpha=r.isBlack?0.9:0.65;
-        ctx.strokeStyle=r.isBlack?"#ef4444":"#06b6d4";
-        ctx.strokeRect(r.x,r.y,r.w,r.h);
-      }
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-      const hitY=keyboardRect.y-keyboardRect.h*(hitLineOffset/100);
-      ctx.globalAlpha=1;
-      ctx.strokeStyle="#facc15";
-      ctx.lineWidth=2;
-      ctx.beginPath();
-      ctx.moveTo(keyboardRect.x,hitY);
-      ctx.lineTo(keyboardRect.x+keyboardRect.w,hitY);
-      ctx.stroke();
-      ctx.restore();
-    }
+    if (keyboardRect) {
+      const hitLineY = keyboardRect.y - keyboardRect.h * (lineOffset / 100);
+      context.save();
+      context.strokeStyle = "#58d7ff";
+      context.lineWidth = 2;
+      context.strokeRect(keyboardRect.x, keyboardRect.y, keyboardRect.w, keyboardRect.h);
+      context.fillStyle = "rgba(88, 215, 255, 0.08)";
+      context.fillRect(keyboardRect.x, keyboardRect.y, keyboardRect.w, keyboardRect.h);
 
-    if(dragRect){
-      ctx.save();
-      ctx.strokeStyle="#facc15";
-      ctx.lineWidth=2;
-      ctx.strokeRect(dragRect.x,dragRect.y,dragRect.w,dragRect.h);
-      ctx.restore();
-    }
-  }
-
-  function reset(){
-    baselineRef.current.clear();
-    activeRef.current.clear();
-    pendingOnRef.current.clear();
-    pendingOffRef.current.clear();
-    signalRef.current.clear();
-    eventsRef.current=[];
-    setEventCount(0);
-  }
-
-  function loop(){
-    const v=videoRef.current, c=canvasRef.current;
-    if(!v||!c) return;
-    const ctx=c.getContext("2d");
-    if(!ctx) return;
-
-    ctx.drawImage(v,0,0,c.width,c.height);
-    const now=v.currentTime*1000;
-    const hitY=keyboardRect ? keyboardRect.y-keyboardRect.h*(hitLineOffset/100) : 0;
-
-    for(const key of regions){
-      const glow=getLumaScore(ctx,key);
-      const base=baselineRef.current.get(key.midi) ?? glow;
-      const gdiff=glow-base;
-      const wc = hexToRgb(whiteNoteColor);
-      const bc = hexToRgb(blackNoteColor);
-      const lc = hexToRgb(leftHandColor);
-      const rc = hexToRgb(rightHandColor);
-      const lbc = hexToRgb(leftHandBlackColor);
-      const rbc = hexToRgb(rightHandBlackColor);
-      const whiteHue = rgbToHsv(wc.r, wc.g, wc.b).h;
-      const blackHue = rgbToHsv(bc.r, bc.g, bc.b).h;
-      const leftHue = rgbToHsv(lc.r, lc.g, lc.b).h;
-      const rightHue = rgbToHsv(rc.r, rc.g, rc.b).h;
-      const leftBlackHue = rgbToHsv(lbc.r, lbc.g, lbc.b).h;
-      const rightBlackHue = rgbToHsv(rbc.r, rbc.g, rbc.b).h;
-      const keyHue = key.isBlack ? blackHue : whiteHue;
-      const splitX = keyboardRect ? keyboardRect.x + keyboardRect.w * (handSplit / 100) : c.width * 0.5;
-      const onLeft = (key.x + key.w * 0.5) < splitX;
-      const handHue = onLeft
-        ? (key.isBlack ? leftBlackHue : leftHue)
-        : (key.isBlack ? rightBlackHue : rightHue);
-      const targetHue = colorMode === "key" ? keyHue : colorMode === "hand" ? handHue : (keyHue + handHue) * 0.5;
-      const fall= keyboardRect ? scanLine(ctx,key,hitY,lineHeight,colorStrictness,targetHue) : {ratio:0,strength:0};
-
-      const sig = signalRef.current.get(key.midi) ?? { fallEma: 0, glowEma: 0 };
-      sig.fallEma = sig.fallEma * 0.72 + fall.ratio * 0.28;
-      sig.glowEma = sig.glowEma * 0.78 + Math.max(0, gdiff) * 0.22;
-      signalRef.current.set(key.midi, sig);
-
-      const fallOn=sig.fallEma>threshold/105;
-      const fallOff=sig.fallEma<threshold/250;
-      const glowOn=sig.glowEma>threshold*0.82;
-      const glowOff=sig.glowEma<threshold*0.34;
-
-      const hybridOnScore = (sig.fallEma * 100) + sig.glowEma * 0.95;
-      const hybridOffScore = (sig.fallEma * 100) + sig.glowEma * 0.62;
-      const shouldOn = mode==="hybrid"
-        ? (hybridOnScore > threshold * 1.42 || (fallOn && glowOn))
-        : mode==="falling" ? fallOn : glowOn;
-      const shouldOff= mode==="hybrid"
-        ? (hybridOffScore < threshold * 0.86 && (fallOff || glowOff))
-        : mode==="falling" ? fallOff : glowOff;
-
-      const strength=Math.max(gdiff,fall.strength);
-      const active=activeRef.current.get(key.midi);
-
-      if(!active && gdiff<threshold*0.7){
-        baselineRef.current.set(key.midi, base*0.97+glow*0.03);
-      }
-
-      if(!active){
-        if(shouldOn){
-          const n=(pendingOnRef.current.get(key.midi)??0)+1;
-          pendingOnRef.current.set(key.midi,n);
-          pendingOffRef.current.set(key.midi,0);
-
-          if(n>=confirmFrames){
-            const corr=(confirmFrames-1)*16.7;
-            activeRef.current.set(key.midi,{
-              startMs:Math.max(0,now-corr),
-              maxStrength:strength,
-              frames:1
-            });
-            pendingOnRef.current.set(key.midi,0);
-          }
-        } else {
-          pendingOnRef.current.set(key.midi,0);
-        }
-      } else {
-        active.frames++;
-        active.maxStrength=Math.max(active.maxStrength,strength);
-
-        if(shouldOff){
-          const n=(pendingOffRef.current.get(key.midi)??0)+1;
-          pendingOffRef.current.set(key.midi,n);
-
-          if(n>=confirmFrames){
-            const corr=(confirmFrames-1)*16.7;
-            const endMs=Math.max(active.startMs+1, now-corr);
-            const dur=endMs-active.startMs;
-
-            if(dur>=minNoteMs){
-              const vel=clamp(Math.round(45+active.maxStrength*1.15),35,120);
-              eventsRef.current.push({midi:key.midi,startMs:active.startMs,endMs,velocity:vel});
-              setEventCount(eventsRef.current.length);
-            }
-
-            activeRef.current.delete(key.midi);
-            pendingOffRef.current.set(key.midi,0);
-          }
-        } else {
-          pendingOffRef.current.set(key.midi,0);
+      for (const key of keys) {
+        const active = analyzerRef.current.activeMidis.has(key.midi);
+        context.globalAlpha = active ? 1 : key.isBlack ? 0.72 : 0.38;
+        context.strokeStyle = active ? "#b8ff5c" : key.isBlack ? "#ff6e7a" : "#65ddeb";
+        context.lineWidth = active ? 3 : 1;
+        context.strokeRect(key.x, key.y, key.w, key.h);
+        if (active && key.w >= 12) {
+          context.fillStyle = "rgba(184, 255, 92, 0.2)";
+          context.fillRect(key.x, key.y, key.w, key.h);
         }
       }
+
+      context.globalAlpha = 1;
+      context.strokeStyle = "#ffd75a";
+      context.lineWidth = 2;
+      context.setLineDash([8, 5]);
+      context.beginPath();
+      context.moveTo(keyboardRect.x, hitLineY);
+      context.lineTo(keyboardRect.x + keyboardRect.w, hitLineY);
+      context.stroke();
+      context.setLineDash([]);
+
+      const splitX = keyboardRect.x + keyboardRect.w * (handSplit / 100);
+      context.strokeStyle = "rgba(255, 255, 255, 0.45)";
+      context.lineWidth = 1;
+      context.beginPath();
+      context.moveTo(splitX, hitLineY - 16);
+      context.lineTo(splitX, keyboardRect.y + keyboardRect.h);
+      context.stroke();
+      context.restore();
     }
 
-    if(keyboardRect){
-      const hitY=keyboardRect.y-keyboardRect.h*(hitLineOffset/100);
-      ctx.strokeStyle="#facc15";
-      ctx.lineWidth=2;
-      ctx.beginPath();
-      ctx.moveTo(keyboardRect.x,hitY);
-      ctx.lineTo(keyboardRect.x+keyboardRect.w,hitY);
-      ctx.stroke();
+    if (dragRect) {
+      context.save();
+      context.strokeStyle = "#ffd75a";
+      context.fillStyle = "rgba(255, 215, 90, 0.12)";
+      context.lineWidth = 2;
+      context.fillRect(dragRect.x, dragRect.y, dragRect.w, dragRect.h);
+      context.strokeRect(dragRect.x, dragRect.y, dragRect.w, dragRect.h);
+      context.restore();
     }
+  };
 
-    for(const r of regions){
-      ctx.strokeStyle=activeRef.current.has(r.midi) ? "#a3e635" : r.isBlack ? "#ef4444" : "#06b6d4";
-      ctx.lineWidth=activeRef.current.has(r.midi) ? 3 : 1;
-      ctx.strokeRect(r.x,r.y,r.w,r.h);
-    }
+  const scheduleFrame = () => {
+    if (!runningRef.current || frameCallbackRef.current !== null || animationFrameRef.current !== null) return;
+    const video = videoRef.current as (HTMLVideoElement & {
+      requestVideoFrameCallback?: (
+        callback: (now: number, metadata: { mediaTime: number }) => void,
+      ) => number;
+    }) | null;
+    if (!video) return;
 
-    if(!v.paused && !v.ended){
-      autoResumeRef.current = 0;
-      rafRef.current=requestAnimationFrame(loop);
+    if (video.requestVideoFrameCallback) {
+      frameCallbackRef.current = video.requestVideoFrameCallback((_now, metadata) => {
+        frameCallbackRef.current = null;
+        processFrame(metadata.mediaTime * 1000);
+      });
     } else {
-      if (!v.ended && autoResumeRef.current < 10) {
-        autoResumeRef.current += 1;
-        v.play().catch(()=>{});
-        rafRef.current=requestAnimationFrame(loop);
-      } else {
-        setIsAnalyzing(false);
-        setStatus(v.ended ? "解析完了（動画末尾）" : "解析停止");
-      }
-    }
-  }
-
-  function start(){
-    const v=videoRef.current;
-    if(!v||!keyboardRect){
-      setStatus("先に動画読み込みと鍵盤範囲指定をしてください");
-      return;
-    }
-    reset();
-    setIsAnalyzing(true);
-    setStatus("解析中");
-    autoResumeRef.current = 0;
-    v.play();
-    rafRef.current=requestAnimationFrame(loop);
-  }
-
-  function stop(){
-    if(rafRef.current) cancelAnimationFrame(rafRef.current);
-    rafRef.current=null;
-    setIsAnalyzing(false);
-    videoRef.current?.pause();
-    setStatus("停止");
-  }
-
-  function fitKeyboardDefault() {
-    const c = canvasRef.current;
-    const v = videoRef.current;
-    if (!c || !v) return;
-    const ctx = c.getContext("2d");
-    if (!ctx) return;
-    ctx.drawImage(v,0,0,c.width,c.height);
-    setKeyboardRect(estimateKeyboardRect(ctx));
-    setStatus("鍵盤範囲を自動配置しました。必要なら下のスライダーで微調整してください。");
-  }
-  function applySynthesiaBlueGreenPreset() {
-    setColorMode("hand");
-    setLeftHandColor("#6fb8ff");
-    setRightHandColor("#9bdc4b");
-    setLeftHandBlackColor("#3f7fc9");
-    setRightHandBlackColor("#6da12f");
-    setColorStrictness(8);
-    setThreshold(16);
-    setStatus("Synthesia青/緑プリセットを適用しました。必要なら左右分割位置だけ調整してください。");
-  }
-  function applyHighAccuracyPreset() {
-    setMode("hybrid");
-    setConfirmFrames(3);
-    setMinNoteMs(48);
-    setThreshold(20);
-    setLineHeight(5);
-    setColorStrictness(12);
-    setStatus("高精度プリセットを適用しました（取りこぼし減 / 誤検出抑制バランス）。");
-  }
-
-  function updateKeyboardRect(patch: Partial<Rect>) {
-    const c = canvasRef.current;
-    if (!c) return;
-    const base = keyboardRect ?? { x: 0, y: Math.round(c.height * 0.62), w: c.width, h: Math.round(c.height * 0.34) };
-    const next = { ...base, ...patch };
-    next.x = clamp(Math.round(next.x), -Math.round(c.width), Math.max(0, c.width - 10));
-    next.y = clamp(Math.round(next.y), 0, Math.max(0, c.height - 10));
-    next.w = clamp(Math.round(next.w), 10, Math.round(c.width * 1.5));
-    next.h = clamp(Math.round(next.h), 10, c.height - next.y);
-    setKeyboardRect(next);
-  }
-
-  function exportMidi(){
-    const v=videoRef.current;
-    const now=v ? v.currentTime*1000 : 0;
-
-    for(const [m,a] of activeRef.current){
-      eventsRef.current.push({
-        midi:m,
-        startMs:a.startMs,
-        endMs:Math.max(now,a.startMs+minNoteMs),
-        velocity:clamp(Math.round(45+a.maxStrength*1.4),35,115)
+      animationFrameRef.current = requestAnimationFrame(() => {
+        animationFrameRef.current = null;
+        processFrame((videoRef.current?.currentTime ?? 0) * 1000);
       });
     }
-    activeRef.current.clear();
+  };
 
-    const sorted = denoiseAndMerge(eventsRef.current, minNoteMs);
+  const findAudioOnset = (nowMs: number) => {
+    const onsets = audioOnsetsRef.current;
+    while (
+      audioIndexRef.current < onsets.length
+      && onsets[audioIndexRef.current].ms < nowMs - 58
+    ) audioIndexRef.current += 1;
+    const onset = onsets[audioIndexRef.current];
+    if (!onset || Math.abs(onset.ms - nowMs) > 46) return undefined;
+    return onset;
+  };
 
-    if(!sorted.length){
-      setStatus("ノートなし。thresholdを下げるかline offsetを調整");
+  const appendEvents = (events: NoteEvent[]) => {
+    if (!events.length) return;
+    setNoteCount(analyzerRef.current.events.length);
+    setRecentEvents((previous) => [...previous, ...events].slice(-8));
+  };
+
+  const finishAnalysis = (message = "解析が完了しました") => {
+    const nowMs = (videoRef.current?.currentTime ?? 0) * 1000;
+    appendEvents(analyzerRef.current.finish(nowMs, minimumNoteMs));
+    runningRef.current = false;
+    cancelScheduledFrame();
+    setIsRunning(false);
+    setActiveCount(0);
+    setProgress(1);
+    setStage("complete");
+    setStatus(message);
+  };
+
+  const processFrame = (nowMs: number) => {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    const context = canvas?.getContext("2d");
+    if (!video || !canvas || !context || !keyboardRect || !runningRef.current) return;
+
+    if (video.ended || nowMs >= video.duration * 1000 - 8) {
+      finishAnalysis();
+      return;
+    }
+    if (video.paused) {
+      scheduleFrame();
       return;
     }
 
-    const bytes=buildExactMidi(sorted,120);
-    const url=URL.createObjectURL(new Blob([bytes],{type:"audio/midi"}));
-    const a=document.createElement("a");
-    a.href=url;
-    a.download="perfect.mid";
-    a.click();
-    URL.revokeObjectURL(url);
-    setEventCount(sorted.length);
-    setStatus(`MIDI出力完了: ${sorted.length} notes`);
-  }
-
-  function canvasPoint(e:React.PointerEvent<HTMLCanvasElement>){
-    const c=canvasRef.current!;
-    const r=c.getBoundingClientRect();
-    return {
-      x:((e.clientX-r.left)/r.width)*c.width,
-      y:((e.clientY-r.top)/r.height)*c.height
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const settings: FrameAnalyzerSettings = {
+      mode,
+      threshold,
+      colorTolerance,
+      blackGuard,
+      handSplit,
+      leftHue,
+      rightHue,
+      lineOffset,
+      lineHeight,
+      confirmFrames,
+      minimumNoteMs,
     };
-  }
+    const result = analyzerRef.current.process(
+      context,
+      nowMs,
+      keyboardRect,
+      keys,
+      settings,
+      findAudioOnset(nowMs),
+    );
+    appendEvents(result.added);
+    setActiveCount(result.activeCount);
+    const seconds = nowMs / 1000;
+    setCurrentTime(seconds);
+    setProgress(duration > 0 ? clamp(seconds / duration, 0, 1) : 0);
+    drawFrame();
+    scheduleFrame();
+  };
+
+  const seekTo = async (seconds: number) => {
+    const video = videoRef.current;
+    if (!video) return;
+    const target = clamp(seconds, 0, Math.max(0, video.duration || seconds));
+    if (Math.abs(video.currentTime - target) < 0.015) {
+      video.currentTime = target;
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      const done = () => resolve();
+      video.addEventListener("seeked", done, { once: true });
+      video.currentTime = target;
+    });
+  };
+
+  const syncCanvas = () => {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !canvas) return;
+    const sourceWidth = video.videoWidth || 1280;
+    const sourceHeight = video.videoHeight || 720;
+    const scale = Math.min(1, 1280 / sourceWidth);
+    canvas.width = Math.max(1, Math.round(sourceWidth * scale));
+    canvas.height = Math.max(1, Math.round(sourceHeight * scale));
+    setDuration(Number.isFinite(video.duration) ? video.duration : 0);
+    const context = canvas.getContext("2d");
+    if (context) {
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const geometry = estimateKeyboardGeometry(context);
+      setKeyboardRect(geometry.rect);
+      setKeyboardConfidence(geometry.confidence);
+      setStage("calibrate");
+      setStatus("鍵盤範囲とノーツ色を確認してください");
+    }
+    drawFrame();
+  };
+
+  const autoFitKeyboard = async () => {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    const context = canvas?.getContext("2d");
+    if (!video || !canvas || !context) return;
+
+    const wasPaused = video.paused;
+    const origin = video.currentTime;
+    const sampleTimes = duration > 1
+      ? [0.04, 0.12, 0.24, 0.39, 0.56, 0.73, 0.88]
+        .map((ratio) => clamp(duration * ratio, 0, Math.max(0.01, duration - 0.05)))
+      : [origin];
+    const geometries: KeyboardGeometry[] = [];
+    setStatus("複数フレームから鍵盤を推定しています…");
+
+    for (const sampleTime of sampleTimes) {
+      await seekTo(sampleTime);
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      geometries.push(estimateKeyboardGeometry(context));
+    }
+
+    const fallback = keyboardRect ?? {
+      x: 0,
+      y: Math.round(canvas.height * 0.62),
+      w: canvas.width,
+      h: Math.round(canvas.height * 0.32),
+    };
+    const result = medianKeyboardGeometry(geometries, fallback);
+    setKeyboardRect(result.rect);
+    setKeyboardConfidence(result.confidence);
+    await seekTo(origin);
+    if (!wasPaused) void video.play();
+    setStage("ready");
+    setStatus(`鍵盤を自動設定しました（信頼度 ${Math.round(result.confidence * 100)}%）`);
+    drawFrame();
+  };
+
+  const updateKeyboardRect = (patch: Partial<Rect>) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const base = keyboardRect ?? {
+      x: 0,
+      y: Math.round(canvas.height * 0.62),
+      w: canvas.width,
+      h: Math.round(canvas.height * 0.32),
+    };
+    const next = { ...base, ...patch };
+    next.x = clamp(Math.round(next.x), -Math.round(canvas.width * 0.55), Math.round(canvas.width * 0.4));
+    next.y = clamp(Math.round(next.y), 0, canvas.height - 10);
+    next.w = clamp(Math.round(next.w), 20, Math.round(canvas.width * 1.9));
+    next.h = clamp(Math.round(next.h), 20, canvas.height - next.y);
+    setKeyboardRect(next);
+    setKeyboardConfidence(1);
+    setStage("ready");
+  };
+
+  const canvasPoint = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current!;
+    const bounds = canvas.getBoundingClientRect();
+    return {
+      x: (event.clientX - bounds.left) / bounds.width * canvas.width,
+      y: (event.clientY - bounds.top) / bounds.height * canvas.height,
+    };
+  };
+
+  const sampleCanvasColor = (point: { x: number; y: number }) => {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    const context = canvas?.getContext("2d");
+    if (!video || !canvas || !context || !sampleTarget) return false;
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const x = clamp(Math.round(point.x), 0, canvas.width - 1);
+    const y = clamp(Math.round(point.y), 0, canvas.height - 1);
+    const pixel = context.getImageData(x, y, 1, 1).data;
+    const color = rgbToHex(pixel[0], pixel[1], pixel[2]);
+    if (sampleTarget === "left") setLeftColor(color);
+    else setRightColor(color);
+    setSampleTarget(null);
+    setStage("ready");
+    setStatus(`${sampleTarget === "left" ? "左手" : "右手"}ノーツ色を ${color} に設定しました`);
+    drawFrame();
+    return true;
+  };
+
+  const loadAudio = async (file: File) => {
+    audioAbortRef.current?.abort();
+    const controller = new AbortController();
+    audioAbortRef.current = controller;
+    audioOnsetsRef.current = [];
+    setAudioStatus("loading");
+    setAudioProgress(0);
+    setAudioOnsetCount(0);
+
+    try {
+      const onsets = await analyzeAudioOnsets(
+        file,
+        (value: AudioAnalysisProgress) => setAudioProgress(value.progress),
+        controller.signal,
+      );
+      if (controller.signal.aborted) return;
+      audioOnsetsRef.current = onsets;
+      setAudioOnsetCount(onsets.length);
+      setAudioStatus(onsets.length ? "ready" : "unavailable");
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      setAudioStatus("unavailable");
+    }
+  };
+
+  const handleFile = (file: File) => {
+    runningRef.current = false;
+    cancelScheduledFrame();
+    audioAbortRef.current?.abort();
+    if (sourceUrlRef.current) URL.revokeObjectURL(sourceUrlRef.current);
+    const url = URL.createObjectURL(file);
+    sourceUrlRef.current = url;
+    setSourceUrl(url);
+    setFileName(file.name);
+    setKeyboardRect(null);
+    setKeyboardConfidence(0);
+    setDragRect(null);
+    setCurrentTime(0);
+    setDuration(0);
+    setStage("calibrate");
+    setStatus("動画を読み込み中…");
+    resetAnalysis();
+    void loadAudio(file);
+  };
+
+  const startAnalysis = async () => {
+    const video = videoRef.current;
+    if (!video || !keyboardRect) {
+      setStatus("先に動画と鍵盤範囲を設定してください");
+      return;
+    }
+
+    cancelScheduledFrame();
+    resetAnalysis();
+    await seekTo(0);
+    video.playbackRate = QUALITY_SETTINGS[quality].playbackRate;
+    runningRef.current = true;
+    setIsRunning(true);
+    setStage("analyzing");
+    setStatus(`解析中 — ${QUALITY_SETTINGS[quality].label}モード`);
+    try {
+      await video.play();
+      scheduleFrame();
+    } catch {
+      runningRef.current = false;
+      setIsRunning(false);
+      setStatus("再生がブロックされました。もう一度「解析開始」を押してください");
+    }
+  };
+
+  const stopAnalysis = () => {
+    runningRef.current = false;
+    cancelScheduledFrame();
+    videoRef.current?.pause();
+    setIsRunning(false);
+    setStage(analyzerRef.current.events.length ? "complete" : "ready");
+    setStatus("解析を停止しました。途中結果をMIDIに書き出せます");
+  };
+
+  const exportMidi = () => {
+    const nowMs = (videoRef.current?.currentTime ?? 0) * 1000;
+    appendEvents(analyzerRef.current.finish(nowMs, minimumNoteMs));
+    const events = finalizeNoteEvents(
+      analyzerRef.current.events,
+      minimumNoteMs,
+      audioOnsetsRef.current,
+      leadMs,
+    );
+    if (!events.length) {
+      setStatus("書き出せるノートがありません。色・判定ライン・感度を確認してください");
+      return;
+    }
+    const safeName = fileName.replace(/\.[^.]+$/, "") || "piano-video";
+    downloadBlob(new Blob([buildMidi(events, bpm)], { type: "audio/midi" }), `${safeName}.mid`);
+    setNoteCount(events.length);
+    setRecentEvents(events.slice(-8));
+    setStatus(`MIDIを書き出しました（${events.length}ノート）`);
+  };
+
+  const applyPreset = (name: keyof typeof PRESETS) => {
+    const preset = PRESETS[name];
+    setLeftColor(preset.left);
+    setRightColor(preset.right);
+    setThreshold(preset.threshold);
+    setColorTolerance(preset.colorTolerance);
+    setBlackGuard(preset.blackGuard);
+    setLineHeight(preset.lineHeight);
+    setMode("balanced");
+    setStage(keyboardRect ? "ready" : stage);
+    setStatus(`${name === "synthesia" ? "Synthesia 青/緑" : "ネオン 青/ピンク"}プリセットを適用しました`);
+  };
+
+  useEffect(() => {
+    drawFrame();
+  }, [keyboardRect, dragRect, lineOffset, handSplit, keys.length]);
 
   useEffect(() => {
     return () => {
-      if (videoUrlRef.current) URL.revokeObjectURL(videoUrlRef.current);
+      runningRef.current = false;
+      cancelScheduledFrame();
+      audioAbortRef.current?.abort();
+      if (sourceUrlRef.current) URL.revokeObjectURL(sourceUrlRef.current);
     };
   }, []);
 
+  const canvasWidth = canvasRef.current?.width ?? 960;
+  const canvasHeight = canvasRef.current?.height ?? 540;
+  const canStart = Boolean(sourceUrl && keyboardRect && !isRunning);
   return (
-    <div className="app-shell">
-      <div className="app-container">
+    <main className="app-shell">
+      <header className="topbar">
         <div>
-          <h1 className="app-title">Perfect Piano Video → MIDI</h1>
-          <p className="app-subtitle">Synthesia / Ember風動画からMIDIを生成</p>
+          <div className="eyebrow">LOCAL • PRIVATE • VIDEO TO MIDI</div>
+          <h1>Piano Video to MIDI</h1>
+          <p>映像のノーツ追跡と音声onsetを統合して、編集可能なMIDIへ変換します。</p>
         </div>
+        <div className="privacy-badge"><span />ファイルは端末外へ送信されません</div>
+      </header>
 
-        <div className="layout-grid">
-          <div className="video-panel">
-            <input
-              className="file-input"
-              type="file"
-              accept="video/*"
-              onChange={e=>{
-                const f=e.target.files?.[0];
-                if(!f) return;
-                if (videoUrlRef.current) URL.revokeObjectURL(videoUrlRef.current);
-                videoUrlRef.current = URL.createObjectURL(f);
-                setVideoUrl(videoUrlRef.current);
-                setKeyboardRect(null);
-                setDragRect(null);
-                reset();
-                setStatus("動画読み込み完了。Canvas上で鍵盤全体をドラッグ");
-              }}
-            />
+      <section className="workspace">
+        <PreviewPanel
+          sourceUrl={sourceUrl}
+          videoRef={videoRef}
+          canvasRef={canvasRef}
+          sampleTarget={sampleTarget}
+          isRunning={isRunning}
+          currentTime={currentTime}
+          duration={duration}
+          progress={progress}
+          noteCount={noteCount}
+          activeCount={activeCount}
+          audioStatus={audioStatus}
+          audioProgress={audioProgress}
+          audioOnsetCount={audioOnsetCount}
+          recentEvents={recentEvents}
+          onFile={handleFile}
+          onLoadedMetadata={syncCanvas}
+          onSeeked={() => {
+            setCurrentTime(videoRef.current?.currentTime ?? 0);
+            drawFrame();
+          }}
+          onTimeUpdate={() => {
+            if (!runningRef.current) {
+              setCurrentTime(videoRef.current?.currentTime ?? 0);
+              drawFrame();
+            }
+          }}
+          onEnded={() => { if (runningRef.current) finishAnalysis(); }}
+          onPointerDown={(event) => {
+            if (isRunning) return;
+            const point = canvasPoint(event);
+            if (sampleCanvasColor(point)) return;
+            event.currentTarget.setPointerCapture(event.pointerId);
+            setDragStart(point);
+            setDragRect({ x: point.x, y: point.y, w: 1, h: 1 });
+          }}
+          onPointerMove={(event) => {
+            if (!dragStart || isRunning || sampleTarget) return;
+            const point = canvasPoint(event);
+            setDragRect({
+              x: Math.min(point.x, dragStart.x),
+              y: Math.min(point.y, dragStart.y),
+              w: Math.abs(point.x - dragStart.x),
+              h: Math.abs(point.y - dragStart.y),
+            });
+          }}
+          onPointerUp={(event) => {
+            if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+              event.currentTarget.releasePointerCapture(event.pointerId);
+            }
+            if (dragRect && dragRect.w > 60 && dragRect.h > 20) {
+              setKeyboardRect(dragRect);
+              setKeyboardConfidence(1);
+              setStage("ready");
+              setStatus("鍵盤範囲を手動設定しました");
+            }
+            setDragStart(null);
+            setDragRect(null);
+          }}
+          onTogglePreview={() => {
+            const video = videoRef.current;
+            if (!video || isRunning) return;
+            if (video.paused) void video.play();
+            else video.pause();
+          }}
+          onSeek={(seconds) => {
+            setCurrentTime(seconds);
+            if (videoRef.current) videoRef.current.currentTime = seconds;
+          }}
+          onAutoFit={autoFitKeyboard}
+          onRefresh={drawFrame}
+        />
 
-            <video
-              ref={videoRef}
-              src={videoUrl}
-              onLoadedMetadata={syncCanvasSize}
-              onSeeked={drawFrame}
-              onPause={drawFrame}
-              onTimeUpdate={() => { if (!isAnalyzing) drawFrame(); }}
-              controls
-              playsInline
-              className="video-preview"
-            />
-
-            <canvas
-              ref={canvasRef}
-              className="canvas-preview"
-              onPointerDown={e=>{
-                const p=canvasPoint(e);
-                setDragStart(p);
-                setDragRect({x:p.x,y:p.y,w:1,h:1});
-              }}
-              onPointerMove={e=>{
-                if(!dragStart) return;
-                const p=canvasPoint(e);
-                setDragRect({
-                  x:Math.min(p.x,dragStart.x),
-                  y:Math.min(p.y,dragStart.y),
-                  w:Math.abs(p.x-dragStart.x),
-                  h:Math.abs(p.y-dragStart.y)
-                });
-              }}
-              onPointerUp={()=>{
-                if(dragRect && dragRect.w>50 && dragRect.h>10){
-                  setKeyboardRect(dragRect);
-                  setStatus("鍵盤範囲設定完了。黄色線が判定ライン");
-                }
-                setDragStart(null);
-              }}
-            />
-            <div className="status-box">
-              範囲指定が難しい場合: 「鍵盤範囲を自動配置」→ 下の X/Y/W/H スライダーで微調整
-            </div>
-          </div>
-
-          <div className="control-panel">
-            <div className="status-box">{status}</div>
-
-            <label className="control-group">
-              検出モード
-              <select className="control-input" value={mode} onChange={e=>setMode(e.target.value as DetectionMode)}>
-                <option value="hybrid">Hybrid: 落下ノーツ + 発光</option>
-                <option value="falling">Falling: 落下ノーツのみ</option>
-                <option value="glow">Glow: 発光のみ</option>
-              </select>
-            </label>
-
-            <label className="control-group">threshold {threshold}
-              <input className="control-input" type="range" min={5} max={60} value={threshold} onChange={e=>setThreshold(+e.target.value)}/>
-            </label>
-
-            <label className="control-group">line offset {hitLineOffset}%
-              <input className="control-input" type="range" min={2} max={60} value={hitLineOffset} onChange={e=>setHitLineOffset(+e.target.value)}/>
-            </label>
-
-            <label className="control-group">line height {lineHeight}px
-              <input className="control-input" type="range" min={1} max={16} value={lineHeight} onChange={e=>setLineHeight(+e.target.value)}/>
-            </label>
-
-            <label className="control-group">color strict {colorStrictness}
-              <input className="control-input" type="range" min={0} max={40} value={colorStrictness} onChange={e=>setColorStrictness(+e.target.value)}/>
-            </label>
-            <label className="control-group">
-              色モード
-              <select className="control-input" value={colorMode} onChange={e=>setColorMode(e.target.value as ColorMode)}>
-                <option value="both">鍵盤色 + 手色（Synthesia推奨）</option>
-                <option value="key">鍵盤色のみ</option>
-                <option value="hand">手色のみ</option>
-              </select>
-            </label>
-            <label className="control-group">白鍵ノーツ色
-              <input className="control-input" type="color" value={whiteNoteColor} onChange={e=>setWhiteNoteColor(e.target.value)} />
-            </label>
-            <label className="control-group">黒鍵ノーツ色
-              <input className="control-input" type="color" value={blackNoteColor} onChange={e=>setBlackNoteColor(e.target.value)} />
-            </label>
-            <label className="control-group">左手ノーツ色
-              <input className="control-input" type="color" value={leftHandColor} onChange={e=>setLeftHandColor(e.target.value)} />
-            </label>
-            <label className="control-group">左手黒鍵ノーツ色（濃い色）
-              <input className="control-input" type="color" value={leftHandBlackColor} onChange={e=>setLeftHandBlackColor(e.target.value)} />
-            </label>
-            <label className="control-group">右手ノーツ色
-              <input className="control-input" type="color" value={rightHandColor} onChange={e=>setRightHandColor(e.target.value)} />
-            </label>
-            <label className="control-group">右手黒鍵ノーツ色（濃い色）
-              <input className="control-input" type="color" value={rightHandBlackColor} onChange={e=>setRightHandBlackColor(e.target.value)} />
-            </label>
-            <label className="control-group">左右分割位置 {handSplit}%
-              <input className="control-input" type="range" min={20} max={80} value={handSplit} onChange={e=>setHandSplit(+e.target.value)} />
-            </label>
-
-            <label className="control-group">confirm frames {confirmFrames}
-              <input className="control-input" type="range" min={1} max={5} value={confirmFrames} onChange={e=>setConfirmFrames(+e.target.value)}/>
-            </label>
-
-            <label className="control-group">min note {minNoteMs}ms
-              <input className="control-input" type="range" min={10} max={160} value={minNoteMs} onChange={e=>setMinNoteMs(+e.target.value)}/>
-            </label>
-
-            <div className="button-grid">
-              <button className="btn btn-primary" onClick={start} disabled={isAnalyzing}>start</button>
-              <button className="btn" onClick={stop} disabled={!isAnalyzing}>stop</button>
-              <button className="btn btn-success button-wide" onClick={exportMidi}>export MIDI</button>
-            </div>
-            <div className="button-grid">
-              <button className="btn button-wide" onClick={fitKeyboardDefault}>鍵盤範囲を自動配置</button>
-              <button className="btn button-wide" onClick={applySynthesiaBlueGreenPreset}>Synthesia 青/緑プリセット</button>
-              <button className="btn button-wide" onClick={applyHighAccuracyPreset}>高精度プリセット</button>
-            </div>
-            {keyboardRect && (
-              <div>
-                <label className="control-group">keyboard X {Math.round(keyboardRect.x)}
-                  <input className="control-input" type="range" min={-Math.round(canvasRef.current?.width ?? 1)} max={canvasRef.current?.width ?? 1} value={keyboardRect.x} onChange={e=>updateKeyboardRect({x:+e.target.value})}/>
-                </label>
-                <label className="control-group">keyboard Y {Math.round(keyboardRect.y)}
-                  <input className="control-input" type="range" min={0} max={canvasRef.current?.height ?? 1} value={keyboardRect.y} onChange={e=>updateKeyboardRect({y:+e.target.value})}/>
-                </label>
-                <label className="control-group">keyboard W {Math.round(keyboardRect.w)}
-                  <input className="control-input" type="range" min={50} max={Math.round((canvasRef.current?.width ?? 100) * 1.5)} value={keyboardRect.w} onChange={e=>updateKeyboardRect({w:+e.target.value})}/>
-                </label>
-                <label className="control-group">keyboard H {Math.round(keyboardRect.h)}
-                  <input className="control-input" type="range" min={30} max={canvasRef.current?.height ?? 30} value={keyboardRect.h} onChange={e=>updateKeyboardRect({h:+e.target.value})}/>
-                </label>
-              </div>
-            )}
-            <p className="help-text">Tip: Hybrid + confirm frames 2-3 + min note 40-70ms がSynthesiaで安定しやすいです。</p>
-
-            <div className="notes-count">notes: {eventCount}</div>
-          </div>
-        </div>
-      </div>
-    </div>
+        <ControlPanel
+          stage={stage}
+          status={status}
+          fileName={fileName}
+          sourceUrl={sourceUrl}
+          keyboardRect={keyboardRect}
+          keyboardConfidence={keyboardConfidence}
+          canvasWidth={canvasWidth}
+          canvasHeight={canvasHeight}
+          isRunning={isRunning}
+          sampleTarget={sampleTarget}
+          leftColor={leftColor}
+          rightColor={rightColor}
+          handSplit={handSplit}
+          quality={quality}
+          qualitySettings={QUALITY_SETTINGS}
+          audioStatus={audioStatus}
+          audioProgress={audioProgress}
+          audioOnsetCount={audioOnsetCount}
+          progress={progress}
+          noteCount={noteCount}
+          activeCount={activeCount}
+          mode={mode}
+          threshold={threshold}
+          colorTolerance={colorTolerance}
+          blackGuard={blackGuard}
+          lineOffset={lineOffset}
+          lineHeight={lineHeight}
+          confirmFrames={confirmFrames}
+          minimumNoteMs={minimumNoteMs}
+          leadMs={leadMs}
+          bpm={bpm}
+          onAutoFit={autoFitKeyboard}
+          onManualHint={() => setStatus("プレビュー上で鍵盤全体をドラッグしてください")}
+          onRect={updateKeyboardRect}
+          onPreset={applyPreset}
+          onLeftColor={setLeftColor}
+          onRightColor={setRightColor}
+          onSampleTarget={setSampleTarget}
+          onHandSplit={setHandSplit}
+          onQuality={setQuality}
+          onStart={startAnalysis}
+          onStop={stopAnalysis}
+          onExport={exportMidi}
+          onMode={setMode}
+          onThreshold={setThreshold}
+          onColorTolerance={setColorTolerance}
+          onBlackGuard={setBlackGuard}
+          onLineOffset={setLineOffset}
+          onLineHeight={setLineHeight}
+          onConfirmFrames={setConfirmFrames}
+          onMinimumNoteMs={setMinimumNoteMs}
+          onLeadMs={setLeadMs}
+          onBpm={setBpm}
+        />
+      </section>
+    </main>
   );
 }
