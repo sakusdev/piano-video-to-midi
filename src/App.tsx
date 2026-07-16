@@ -16,6 +16,7 @@ import {
 import { buildMidi } from "./engine/midi";
 import { finalizeNoteEvents } from "./engine/postprocess";
 import { hueFromHex } from "./engine/vision";
+import { VisionWorkerClient } from "./engine/vision-worker";
 import { FrameAnalyzer, type FrameAnalyzerSettings } from "./engine/frame-analyzer";
 import type {
   AnalysisQuality,
@@ -86,6 +87,8 @@ export default function AppRhythm() {
   const audioOnsetsRef = useRef<AudioOnset[]>([]);
   const audioIndexRef = useRef(0);
   const analyzerRef = useRef(new FrameAnalyzer());
+  const visionWorkerRef = useRef(new VisionWorkerClient());
+  const analysisGenerationRef = useRef(0);
 
   const [sourceUrl, setSourceUrl] = useState("");
   const [fileName, setFileName] = useState("");
@@ -143,6 +146,8 @@ export default function AppRhythm() {
   };
 
   const resetAnalysis = () => {
+    analysisGenerationRef.current += 1;
+    visionWorkerRef.current.reset();
     analyzerRef.current.reset();
     audioIndexRef.current = 0;
     setNoteCount(0);
@@ -224,12 +229,12 @@ export default function AppRhythm() {
     if (video.requestVideoFrameCallback) {
       frameCallbackRef.current = video.requestVideoFrameCallback((_now, metadata) => {
         frameCallbackRef.current = null;
-        processFrame(metadata.mediaTime * 1000);
+        void processFrame(metadata.mediaTime * 1000);
       });
     } else {
       animationFrameRef.current = requestAnimationFrame(() => {
         animationFrameRef.current = null;
-        processFrame((videoRef.current?.currentTime ?? 0) * 1000);
+        void processFrame((videoRef.current?.currentTime ?? 0) * 1000);
       });
     }
   };
@@ -255,6 +260,8 @@ export default function AppRhythm() {
     const nowMs = (videoRef.current?.currentTime ?? 0) * 1000;
     appendEvents(analyzerRef.current.finish(nowMs, minimumNoteMs));
     runningRef.current = false;
+    analysisGenerationRef.current += 1;
+    visionWorkerRef.current.reset();
     cancelScheduledFrame();
     setIsRunning(false);
     setActiveCount(0);
@@ -263,7 +270,7 @@ export default function AppRhythm() {
     setStatus(message);
   };
 
-  const processFrame = (nowMs: number) => {
+  const processFrame = async (nowMs: number) => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
     const context = canvas?.getContext("2d");
@@ -278,6 +285,7 @@ export default function AppRhythm() {
       return;
     }
 
+    const generation = analysisGenerationRef.current;
     context.drawImage(video, 0, 0, canvas.width, canvas.height);
     const settings: FrameAnalyzerSettings = {
       mode,
@@ -292,21 +300,49 @@ export default function AppRhythm() {
       confirmFrames,
       minimumNoteMs,
     };
-    const result = analyzerRef.current.process(
-      context,
-      nowMs,
-      keyboardRect,
-      keys,
-      settings,
-      findAudioOnset(nowMs),
-    );
-    appendEvents(result.added);
-    setActiveCount(result.activeCount);
-    const seconds = nowMs / 1000;
-    setCurrentTime(seconds);
-    setProgress(duration > 0 ? clamp(seconds / duration, 0, 1) : 0);
-    drawFrame();
-    scheduleFrame();
+    const hitLineY = keyboardRect.y - keyboardRect.h * (lineOffset / 100);
+
+    try {
+      const vision = await visionWorkerRef.current.analyze(
+        context,
+        keyboardRect,
+        keys,
+        hitLineY,
+        lineHeight,
+        {
+          threshold: threshold * 0.72,
+          colorTolerance,
+          blackGuard,
+          handSplit,
+          leftHue,
+          rightHue,
+        },
+      );
+      if (generation !== analysisGenerationRef.current || !runningRef.current) return;
+      const result = analyzerRef.current.process(
+        nowMs,
+        keys,
+        settings,
+        vision,
+        findAudioOnset(nowMs),
+      );
+      appendEvents(result.added);
+      setActiveCount(result.activeCount);
+      const seconds = nowMs / 1000;
+      setCurrentTime(seconds);
+      setProgress(duration > 0 ? clamp(seconds / duration, 0, 1) : 0);
+      drawFrame();
+      scheduleFrame();
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      if (generation !== analysisGenerationRef.current || !runningRef.current) return;
+      runningRef.current = false;
+      cancelScheduledFrame();
+      video.pause();
+      setIsRunning(false);
+      setStage(analyzerRef.current.events.length ? "complete" : "ready");
+      setStatus("映像解析Workerでエラーが発生しました。設定を確認して再実行してください");
+    }
   };
 
   const seekTo = async (seconds: number) => {
@@ -502,6 +538,8 @@ export default function AppRhythm() {
 
   const stopAnalysis = () => {
     runningRef.current = false;
+    analysisGenerationRef.current += 1;
+    visionWorkerRef.current.reset();
     cancelScheduledFrame();
     videoRef.current?.pause();
     setIsRunning(false);
@@ -549,7 +587,9 @@ export default function AppRhythm() {
   useEffect(() => {
     return () => {
       runningRef.current = false;
+      analysisGenerationRef.current += 1;
       cancelScheduledFrame();
+      visionWorkerRef.current.dispose();
       audioAbortRef.current?.abort();
       if (sourceUrlRef.current) URL.revokeObjectURL(sourceUrlRef.current);
     };
