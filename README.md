@@ -80,6 +80,21 @@ npm run build
 
 Rust環境がないローカル端末でもWebアプリ自体のビルドは継続し、同じWorker内のTypeScript実装へフォールバックします。GitHub Actions、Electron配布、Android APKではRust環境をセットアップしてWASMを必ず生成します。WASMの読み込みや実行に失敗した場合も、重いFFTやピクセル走査がUIスレッドへ戻ることはありません。
 
+## Cloudflare Workers
+
+Web版はCloudflare Workers Static Assetsへそのままデプロイできます。Cloudflareはアプリの配信と`/api/health`だけを担当し、動画・音声・MIDI・解析結果はアップロードも保存もしません。R2、D1、KVは使用しません。
+
+```bash
+npm run dev:cf
+npm run deploy:cf
+```
+
+`wrangler.jsonc`のcustom buildが`npm run build:cf`を実行し、`dist/`を生成してからStatic Assetsとして配信します。SPA fallbackを有効にし、`run_worker_first: true`でWorkerからセキュリティヘッダーを付与します。
+
+CloudflareのGit連携を使う場合は、リポジトリを接続してデプロイコマンドを`npx wrangler@4 deploy`に設定します。ビルドコマンドはWrangler設定内で実行されるため、Cloudflare側では空欄で構いません。
+
+Cloudflareの標準ビルド環境にRustや`wasm-pack`がなくてもWASM版を動かせるよう、CIで生成・検証した`public/wasm/`を同梱しています。Rust側を変更した場合は`npm run build:wasm`を実行し、生成物も更新してください。
+
 ## Build
 
 ```bash
