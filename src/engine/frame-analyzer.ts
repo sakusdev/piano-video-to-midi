@@ -1,12 +1,11 @@
 import { clamp } from "./geometry";
-import { detectColoredNotes, measureKeyGlow, type VisionSettings } from "./vision";
+import type { VisionFrameAnalysis } from "./vision-worker";
 import type {
   ActiveNote,
   AudioOnset,
   DetectionMode,
   NoteEvent,
   PianoKey,
-  Rect,
 } from "./types";
 
 type SignalState = { visualEma: number; glowEma: number };
@@ -84,7 +83,12 @@ export class FrameAnalyzer {
   finish(nowMs: number, minimumNoteMs: number) {
     const added: NoteEvent[] = [];
     for (const [midi, active] of this.active) {
-      const event = this.closeNote(midi, active, Math.max(nowMs, active.startMs + minimumNoteMs), minimumNoteMs);
+      const event = this.closeNote(
+        midi,
+        active,
+        Math.max(nowMs, active.startMs + minimumNoteMs),
+        minimumNoteMs,
+      );
       if (event) added.push(event);
     }
     this.active.clear();
@@ -92,11 +96,10 @@ export class FrameAnalyzer {
   }
 
   process(
-    context: CanvasRenderingContext2D,
     nowMs: number,
-    keyboardRect: Rect,
     keys: PianoKey[],
     settings: FrameAnalyzerSettings,
+    vision: VisionFrameAnalysis,
     audioOnset?: AudioOnset,
   ): FrameProcessResult {
     if (this.lastFrameMs >= 0) {
@@ -107,24 +110,8 @@ export class FrameAnalyzer {
     }
     this.lastFrameMs = nowMs;
 
-    const hitLineY = keyboardRect.y - keyboardRect.h * (settings.lineOffset / 100);
-    const visionSettings: VisionSettings = {
-      threshold: settings.threshold * 0.72,
-      colorTolerance: settings.colorTolerance,
-      blackGuard: settings.blackGuard,
-      handSplit: settings.handSplit,
-      leftHue: settings.leftHue,
-      rightHue: settings.rightHue,
-    };
-    const candidates = detectColoredNotes(
-      context,
-      keyboardRect,
-      keys,
-      hitLineY,
-      settings.lineHeight,
-      visionSettings,
-    );
-    const glowScores = measureKeyGlow(context, keyboardRect, keys);
+    const candidates = vision.candidates;
+    const glowScores = vision.glowScores;
     const audioHit = Boolean(audioOnset && audioOnset.strength >= 0.07);
     const frameCorrection = (settings.confirmFrames - 1) * this.frameDurationMs;
     const added: NoteEvent[] = [];
