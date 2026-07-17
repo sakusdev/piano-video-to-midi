@@ -1,5 +1,11 @@
 /// <reference lib="webworker" />
 
+import { glowSampleRect, mapRunToPianoKey } from "../engine/key-mapping";
+import {
+  WASM_ENGINE_VERSION,
+  WORKER_PROTOCOL_VERSION,
+  errorMessage,
+} from "../engine/reliability";
 import type { DetectionCandidate, PianoKey } from "../engine/types";
 
 type VisionSettings = {
@@ -14,6 +20,7 @@ type VisionSettings = {
 type AnalyzeMessage = {
   kind: "analyze";
   id: number;
+  protocolVersion?: number;
   linePixels: Uint8ClampedArray;
   lineWidth: number;
   lineHeight: number;
@@ -29,20 +36,28 @@ type AnalyzeMessage = {
   wasmModuleUrl: string;
 };
 
-type WorkerResponse = {
+type CompleteResponse = {
   kind: "complete";
   id: number;
   packedCandidates: Float64Array;
   packedGlow: Float64Array;
   engine: "wasm" | "typescript";
-} | {
+  protocolVersion: number;
+  fallbackReason?: string;
+  elapsedMs: number;
+};
+
+type ErrorResponse = {
   kind: "error";
   id: number;
   message: string;
+  code: "invalid-input" | "analysis-failed";
+  protocolVersion: number;
 };
 
 type WasmVisionModule = {
   default: (input?: unknown) => Promise<unknown>;
+  wasm_engine_version: () => string;
   analyze_color_columns: (
     pixels: Uint8Array,
     width: number,
@@ -69,6 +84,7 @@ type ColumnHit = {
   darkRatio: number;
 };
 
+const WASM_LOAD_TIMEOUT_MS = 15_000;
 let wasmModulePromise: Promise<WasmVisionModule> | null = null;
 let wasmModuleUrl = "";
 
@@ -97,6 +113,26 @@ function rgbToHsv(red: number, green: number, blue: number) {
 function hueDistance(left: number, right: number) {
   const distance = Math.abs(left - right) % 360;
   return distance > 180 ? 360 - distance : distance;
+}
+
+function validateMessage(message: AnalyzeMessage) {
+  if (message.protocolVersion !== WORKER_PROTOCOL_VERSION) {
+    throw new TypeError("映像Worker protocol versionが一致しません");
+  }
+  const lineBytes = message.lineWidth * message.lineHeight * 4;
+  const keyboardBytes = message.keyboardWidth * message.keyboardHeight * 4;
+  if (
+    message.lineWidth <= 0
+    || message.lineHeight <= 0
+    || message.keyboardWidth <= 0
+    || message.keyboardHeight <= 0
+    || message.keyboardLogicalWidth <= 0
+    || message.linePixels.byteLength < lineBytes
+    || message.keyboardPixels.byteLength < keyboardBytes
+    || !message.keys.length
+  ) {
+    throw new TypeError("映像解析入力の寸法またはピクセル配列が不正です");
+  }
 }
 
 function analyzeColumnsTypeScript(message: AnalyzeMessage) {
@@ -152,59 +188,21 @@ function analyzeColumnsTypeScript(message: AnalyzeMessage) {
 }
 
 function unpackColumns(packed: Float64Array) {
+  if (!(packed instanceof Float64Array) || packed.length % 4 !== 0) {
+    throw new TypeError("Rust/WASMの色列解析結果が壊れています");
+  }
   const columns: ColumnHit[] = [];
-  for (let index = 0; index + 3 < packed.length; index += 4) {
+  for (let index = 0; index < packed.length; index += 4) {
+    const values = [packed[index], packed[index + 1], packed[index + 2], packed[index + 3]];
+    if (!values.every(Number.isFinite)) throw new TypeError("Rust/WASMの色列解析結果に非有限値があります");
     columns.push({
-      x: packed[index],
-      score: packed[index + 1],
-      strength: packed[index + 2],
-      darkRatio: packed[index + 3],
+      x: values[0],
+      score: values[1],
+      strength: values[2],
+      darkRatio: values[3],
     });
   }
   return columns;
-}
-
-function closestWhiteKey(keys: PianoKey[], centerX: number) {
-  let selected: PianoKey | undefined;
-  let bestDistance = Number.POSITIVE_INFINITY;
-  for (const key of keys) {
-    if (key.isBlack) continue;
-    const distance = Math.abs(key.x + key.w / 2 - centerX);
-    if (distance < bestDistance) {
-      selected = key;
-      bestDistance = distance;
-    }
-  }
-  return selected;
-}
-
-function mapRunToKey(
-  keys: PianoKey[],
-  centerX: number,
-  width: number,
-  strength: number,
-  darkRatio: number,
-) {
-  const white = closestWhiteKey(keys, centerX);
-  if (!white) return undefined;
-  let closestBlack: PianoKey | undefined;
-  let blackDistance = Number.POSITIVE_INFINITY;
-  for (const key of keys) {
-    if (!key.isBlack) continue;
-    const distance = Math.abs(key.x + key.w / 2 - centerX);
-    if (distance < blackDistance) {
-      closestBlack = key;
-      blackDistance = distance;
-    }
-  }
-  if (!closestBlack) return white;
-  const darkBoost = darkRatio > 0.36;
-  const inside = centerX >= closestBlack.x - closestBlack.w * 0.24
-    && centerX <= closestBlack.x + closestBlack.w * 1.24;
-  const centered = blackDistance <= closestBlack.w * (darkBoost ? 0.78 : 0.62);
-  const narrow = width <= closestBlack.w * (darkBoost ? 2.35 : 1.95);
-  const strongEnough = strength >= 11 || (darkBoost && strength >= 7.5);
-  return inside && centered && narrow && strongEnough ? closestBlack : white;
 }
 
 function suppressWeakBlackCandidates(
@@ -217,9 +215,8 @@ function suppressWeakBlackCandidates(
     const key = keys.find((item) => item.midi === midi);
     if (!key?.isBlack) continue;
     const center = key.x + key.w / 2;
-    const darkBoost = candidate.darkRatio > 0.38;
-    const centeredLimit = key.w * (darkBoost ? 0.82 : 0.67) * (1 - guardRatio * 0.16);
-    const widthLimit = key.w * (darkBoost ? 2.5 : 2.05) * (1 - guardRatio * 0.12);
+    const centeredLimit = key.w * (0.7 - guardRatio * 0.13);
+    const widthLimit = key.w * (1.48 - guardRatio * 0.2);
     const centered = Math.abs(candidate.centerX - center) <= centeredLimit;
     const narrow = candidate.width <= widthLimit;
     const neighboringWhiteStrength = Math.max(
@@ -228,10 +225,8 @@ function suppressWeakBlackCandidates(
         .filter((item) => !item.isBlack && Math.abs(item.x + item.w / 2 - center) < item.w * 0.95)
         .map((item) => candidates.get(item.midi)?.strength ?? 0),
     );
-    const relativeRequirement = 1.16 + guardRatio * 0.62;
     const dominated = neighboringWhiteStrength > 0
-      && candidate.strength < neighboringWhiteStrength * relativeRequirement
-      && !darkBoost;
+      && candidate.strength < neighboringWhiteStrength * (1.08 + guardRatio * 0.45);
     if (!centered || !narrow || dominated) candidates.delete(midi);
   }
 }
@@ -256,12 +251,18 @@ function buildCandidates(message: AnalyzeMessage, columns: ColumnHit[]) {
     const darkRatio = run.reduce((sum, column) => sum + column.darkRatio * column.score, 0)
       / Math.max(weight, 1e-6);
     const width = run[run.length - 1].x - run[0].x + 1;
-    const key = mapRunToKey(message.keys, centerX, width, strength, darkRatio);
-    if (!key) continue;
+    const mapping = mapRunToPianoKey(
+      message.keys,
+      centerX,
+      width,
+      message.settings.blackGuard,
+    );
+    if (!mapping) continue;
+    const { key, laneConfidence } = mapping;
     const confidence = clamp(
-      weight / Math.max(1, run.length) * 0.58
-      + clamp(strength / 105, 0, 1) * 0.28
-      + (key.isBlack ? clamp(darkRatio * 1.25, 0, 1) : 0.14),
+      weight / Math.max(1, run.length) * 0.5
+      + clamp(strength / 105, 0, 1) * 0.22
+      + laneConfidence * 0.28,
       0,
       1,
     );
@@ -299,11 +300,12 @@ function keyRects(message: AnalyzeMessage) {
   const packed = new Float64Array(message.keys.length * 5);
   let offset = 0;
   for (const key of message.keys) {
+    const sample = glowSampleRect(key);
     packed[offset] = key.midi;
-    packed[offset + 1] = key.x - message.keyboardX;
-    packed[offset + 2] = key.y - message.keyboardY;
-    packed[offset + 3] = key.w;
-    packed[offset + 4] = key.h;
+    packed[offset + 1] = sample.x - message.keyboardX;
+    packed[offset + 2] = sample.y - message.keyboardY;
+    packed[offset + 3] = sample.w;
+    packed[offset + 4] = sample.h;
     offset += 5;
   }
   return packed;
@@ -348,20 +350,42 @@ function glowTypeScript(message: AnalyzeMessage) {
   return packed;
 }
 
+async function withTimeout<T>(promise: Promise<T>, milliseconds: number) {
+  let timeoutId = 0;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = self.setTimeout(
+      () => reject(new Error(`Rust/WASMの読み込みが${milliseconds / 1_000}秒を超えました`)),
+      milliseconds,
+    );
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    self.clearTimeout(timeoutId);
+  }
+}
+
 async function loadWasm(url: string) {
   if (!wasmModulePromise || wasmModuleUrl !== url) {
     wasmModuleUrl = url;
-    wasmModulePromise = (async () => {
+    wasmModulePromise = withTimeout((async () => {
       const module = await import(/* @vite-ignore */ url) as unknown as WasmVisionModule;
       await module.default();
+      const version = module.wasm_engine_version();
+      if (version !== WASM_ENGINE_VERSION) {
+        throw new Error(`Rust/WASM ABI mismatch: expected ${WASM_ENGINE_VERSION}, received ${version}`);
+      }
       return module;
-    })();
+    })(), WASM_LOAD_TIMEOUT_MS);
   }
   return wasmModulePromise;
 }
 
 async function analyze(message: AnalyzeMessage) {
+  validateMessage(message);
+  const startedAt = performance.now();
   let engine: "wasm" | "typescript" = "wasm";
+  let fallbackReason: string | undefined;
   let columns: ColumnHit[];
   let packedGlow: Float64Array;
   try {
@@ -394,20 +418,24 @@ async function analyze(message: AnalyzeMessage) {
       message.keyboardHeight,
       keyRects(message),
     ));
-  } catch {
+  } catch (error) {
     engine = "typescript";
+    fallbackReason = errorMessage(error);
     wasmModulePromise = null;
     columns = analyzeColumnsTypeScript(message);
     packedGlow = glowTypeScript(message);
   }
 
   const packedCandidates = packCandidates(buildCandidates(message, columns));
-  const response: WorkerResponse = {
+  const response: CompleteResponse = {
     kind: "complete",
     id: message.id,
     packedCandidates,
     packedGlow,
     engine,
+    protocolVersion: WORKER_PROTOCOL_VERSION,
+    fallbackReason,
+    elapsedMs: performance.now() - startedAt,
   };
   self.postMessage(response, { transfer: [packedCandidates.buffer, packedGlow.buffer] });
 }
@@ -415,10 +443,12 @@ async function analyze(message: AnalyzeMessage) {
 self.addEventListener("message", (event: MessageEvent<AnalyzeMessage>) => {
   if (event.data.kind !== "analyze") return;
   void analyze(event.data).catch((error: unknown) => {
-    const response: WorkerResponse = {
+    const response: ErrorResponse = {
       kind: "error",
       id: event.data.id,
-      message: error instanceof Error ? error.message : String(error),
+      message: errorMessage(error),
+      code: error instanceof TypeError ? "invalid-input" : "analysis-failed",
+      protocolVersion: WORKER_PROTOCOL_VERSION,
     };
     self.postMessage(response);
   });
