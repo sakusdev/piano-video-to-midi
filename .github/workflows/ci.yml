@@ -10,9 +10,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: validate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -23,8 +28,91 @@ jobs:
           node-version: 22
           cache: npm
 
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: wasm/piano-core
+
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@wasm-pack
+        with:
+          tool: wasm-pack@0.13.1
+
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
 
-      - name: Type-check and build
+      - name: Check Rust formatting
+        id: rustfmt
+        continue-on-error: true
+        run: cargo fmt --manifest-path wasm/piano-core/Cargo.toml -- --check
+
+      - name: Generate rustfmt diagnostic files
+        if: steps.rustfmt.outcome == 'failure'
+        run: |
+          cargo fmt --manifest-path wasm/piano-core/Cargo.toml
+          git diff -- wasm/piano-core > rustfmt.patch
+
+      - name: Upload rustfmt diagnostics
+        if: steps.rustfmt.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustfmt-diagnostic
+          path: |
+            rustfmt.patch
+            wasm/piano-core/src/lib.rs
+            wasm/piano-core/tests/reliability.rs
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Fail on Rust formatting differences
+        if: steps.rustfmt.outcome == 'failure'
+        run: exit 1
+
+      - name: Run Clippy
+        id: clippy
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --locked --manifest-path wasm/piano-core/Cargo.toml --all-targets -- -D warnings 2>&1 | tee clippy.log
+
+      - name: Upload Clippy diagnostics
+        if: steps.clippy.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: clippy-diagnostic
+          path: clippy.log
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Fail on Clippy warnings
+        if: steps.clippy.outcome == 'failure'
+        run: exit 1
+
+      - name: Test Rust core
+        run: npm run test:wasm
+
+      - name: Validate Cloudflare build script
+        run: bash -n scripts/build-cloudflare.sh
+
+      - name: Type-check, build, and verify artifacts
         run: npm run build
+
+      - name: Validate Cloudflare Worker bundle
+        run: npx --yes wrangler@4 deploy --dry-run --outdir .wrangler-dry-run
+
+      - name: Upload generated WASM
+        uses: actions/upload-artifact@v4
+        with:
+          name: piano-wasm
+          path: |
+            public/wasm
+            wasm/piano-core/Cargo.lock
+          if-no-files-found: error
+          retention-days: 14

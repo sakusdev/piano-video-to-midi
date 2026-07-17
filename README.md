@@ -16,12 +16,16 @@
 
 ## 主な改善点
 
-- 1フレームにつき鍵盤領域をまとめて読み取る高速な画像解析
-- `requestVideoFrameCallback`を使った動画フレーム基準の解析
+- 1フレームにつき判定ラインと鍵盤領域をまとめて取得
+- 色列検出と鍵盤発光のピクセル走査をRust/WebAssembly + 専用Web Workerへ分離
+- `requestVideoFrameCallback`と非同期Worker応答を使った動画フレーム基準の解析
 - 高精度モードでは動画を低速再生し、処理落ちによるフレーム欠落を抑制
 - 複数フレームの中央値を使った鍵盤範囲の自動推定
 - 左右のノーツ色を動画から直接スポイト可能
-- 音声FFTを小分けに実行し、UIを固めずにonsetを解析
+- 音声FFTとonset検出も別のRust/WebAssembly Workerへ分離
+- ピクセル配列と音声バッファはTransferableとして渡し、巨大コピーを削減
+- 停止・動画変更・解析完了時には処理中のWorkerを終了し、古い結果を破棄
+- WASMが使えない環境でも、各Worker内のTypeScript実装へ自動フォールバック
 - 局所中央値/MADによる適応型onset閾値
 - 音声onsetがある同音連打は結合せず、映像上の短い途切れだけを統合
 - 和音を整列しながら、方向性のあるロール/アルペジオは保持
@@ -62,6 +66,35 @@ npm run dev
 
 色の許容幅は、値を上げるほど指定色に厳しくなります。黒鍵が白鍵として検出される場合は黒鍵ガードを下げるのではなく、まずノーツ色と鍵盤範囲を確認してください。
 
+## Rust / WebAssembly engine
+
+音声FFT・onset検出・色列検出・鍵盤発光計測は、Rustから生成したWebAssemblyを専用Web Worker内で実行します。Reactと動画プレビューのメインスレッドは、動画フレームの描画と必要範囲の取得、結果表示を担当します。
+
+Rust/WASMを生成するにはRust toolchain、`wasm32-unknown-unknown` target、`wasm-pack`を用意します。
+
+```bash
+npm run build:wasm
+npm run test:wasm
+npm run build
+```
+
+Rust環境がないローカル端末でもWebアプリ自体のビルドは継続し、同じWorker内のTypeScript実装へフォールバックします。GitHub Actions、Electron配布、Android APKではRust環境をセットアップしてWASMを必ず生成します。WASMの読み込みや実行に失敗した場合も、重いFFTやピクセル走査がUIスレッドへ戻ることはありません。
+
+## Cloudflare Workers
+
+Web版はCloudflare Workers Static Assetsへデプロイできます。Cloudflareはアプリの配信と`/api/health`だけを担当し、動画・音声・MIDI・解析結果はアップロードも保存もしません。R2、D1、KVは使用しません。
+
+```bash
+npm run dev:cf
+npm run deploy:cf
+```
+
+`wrangler.jsonc`のcustom buildが`npm run build:cf`を実行します。Cloudflareのビルド環境にRustがなければminimal toolchainを、`wasm-pack`がなければ公式installerを導入し、RustソースからWASMを生成してからTypeScript型検査とViteビルドを実行します。
+
+Static Assetsでは`dist/`を配信し、SPA fallbackを有効化しています。`run_worker_first: true`により、Workerが`/api/health`を処理し、HTML・JavaScript・Worker・WASMへセキュリティヘッダーとキャッシュ方針を付与します。
+
+CloudflareのGit連携を使う場合はリポジトリを接続し、デプロイコマンドを`npx wrangler@4 deploy`に設定します。ビルドはWrangler設定のcustom buildから実行されるため、Cloudflare側の別のビルドコマンドは不要です。
+
 ## Build
 
 ```bash
@@ -69,7 +102,7 @@ npm run build
 npm run preview
 ```
 
-Pull Requestと`agent/**`ブランチではGitHub ActionsがTypeScriptの型検査とViteビルドを実行します。
+Pull Requestと`agent/**`ブランチではGitHub ActionsがRustテスト、WASM生成、TypeScriptの型検査、Viteビルド、Wrangler dry-runを実行します。
 
 ## Electron
 
@@ -78,7 +111,7 @@ npm run electron:preview
 npm run build:electron
 ```
 
-配布物は`release/`へ生成されます。
+配布物は`release/`へ生成されます。GitHub Actionsの各OS向け配布ビルドにはRust/WASMが含まれます。
 
 ## Android APK
 
@@ -87,7 +120,7 @@ npm run sync:android
 npm run build:android
 ```
 
-ローカルビルドにはAndroid SDKが必要です。GitHub Actionsからdebug APKも生成できます。
+ローカルビルドにはAndroid SDKが必要です。GitHub Actionsから生成するdebug APKにはRust/WASMが含まれます。
 
 ## Privacy
 
