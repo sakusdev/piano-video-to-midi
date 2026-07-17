@@ -8,6 +8,7 @@
   "scripts": {
     "build:wasm": "node scripts/build-wasm.mjs",
     "test:wasm": "cargo test --locked --manifest-path wasm/piano-core/Cargo.toml",
+    "test:key-mapping": "node --experimental-strip-types scripts/test-key-mapping.mjs",
     "lint:wasm": "cargo fmt --manifest-path wasm/piano-core/Cargo.toml -- --check && cargo clippy --locked --manifest-path wasm/piano-core/Cargo.toml --all-targets -- -D warnings",
     "verify:build": "node scripts/verify-build.mjs",
     "dev": "npm run build:wasm && vite",
