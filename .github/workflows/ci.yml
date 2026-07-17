@@ -47,6 +47,9 @@ jobs:
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
 
+      - name: Test piano key mapping
+        run: npm run test:key-mapping
+
       - name: Check Rust formatting
         id: rustfmt
         continue-on-error: true
